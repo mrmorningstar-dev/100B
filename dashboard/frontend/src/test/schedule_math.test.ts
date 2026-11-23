@@ -9,9 +9,13 @@ import {
   sortSlots,
   findNextAvailableSlot,
   generatePreset,
+  formatTimeIST,
+  formatWeekdayIST,
+  formatDateIST,
   formatTimeET,
   formatWeekdayET,
   formatDateET,
+  istToETHHMM,
 } from '../utils/scheduleMath';
 
 describe('scheduleMath utils', () => {
@@ -95,49 +99,153 @@ describe('scheduleMath utils', () => {
     }
   });
 
-  describe('ET timezone formatting', () => {
-    it('formats tomorrow lineup slot times in America/New_York with ET label', () => {
-      // 12:00, 14:00, 17:00 in America/New_York
-      expect(formatTimeET('2026-11-17T12:00:00-05:00')).toBe('12 PM ET');
-      expect(formatTimeET('2026-11-17T14:00:00-05:00')).toBe('2 PM ET');
-      expect(formatTimeET('2026-11-17T17:00:00-05:00')).toBe('5 PM ET');
+  describe('IST timezone formatting', () => {
+    it('formats tomorrow lineup slot times in Asia/Kolkata with IST label', () => {
+      // 12:00, 14:00, 17:00 in America/New_York (EST, UTC-5) -> IST (UTC+5:30)
+      expect(formatTimeIST('2026-11-17T12:00:00-05:00')).toBe('10:30 PM IST');
+      expect(formatTimeIST('2026-11-17T14:00:00-05:00')).toBe('12:30 AM IST');
+      expect(formatTimeIST('2026-11-17T17:00:00-05:00')).toBe('3:30 AM IST');
     });
 
-    it('formats rail next run and last run in America/New_York with ET label', () => {
-      // Next run at 18:00 (6 PM) in ET
-      expect(formatWeekdayET('2026-11-16T18:00:00-05:00')).toBe('Mon');
-      expect(formatTimeET('2026-11-16T18:00:00-05:00')).toBe('6 PM ET');
-      expect(formatWeekdayET('2026-11-17T18:00:00-05:00')).toBe('Tue');
-      expect(formatTimeET('2026-11-17T18:00:00-05:00')).toBe('6 PM ET');
+    it('formats rail next run and last run in Asia/Kolkata with IST label', () => {
+      // Next run at 18:00 (6 PM ET) -> 04:30 AM IST next day
+      expect(formatWeekdayIST('2026-11-16T18:00:00-05:00')).toBe('Tue');
+      expect(formatTimeIST('2026-11-16T18:00:00-05:00')).toBe('4:30 AM IST');
+      expect(formatWeekdayIST('2026-11-17T18:00:00-05:00')).toBe('Wed');
+      expect(formatTimeIST('2026-11-17T18:00:00-05:00')).toBe('4:30 AM IST');
 
       // Last run with non-zero minutes
-      expect(formatWeekdayET('2026-11-14T18:02:15-05:00')).toBe('Sat');
-      expect(formatTimeET('2026-11-14T18:02:15-05:00')).toBe('6:02 PM ET');
+      expect(formatWeekdayIST('2026-11-14T18:02:15-05:00')).toBe('Sun');
+      expect(formatTimeIST('2026-11-14T18:02:15-05:00')).toBe('4:32 AM IST');
     });
 
-    it('formats minute and HH:MM inputs in ET', () => {
-      expect(formatTimeET('12:00')).toBe('12 PM ET');
-      expect(formatTimeET('18:30')).toBe('6:30 PM ET');
-      expect(formatTimeET(720)).toBe('12 PM ET');
-      expect(formatTimeET(1110)).toBe('6:30 PM ET');
+    it('formats minute and HH:MM inputs in IST', () => {
+      expect(formatTimeIST('12:00')).toBe('10:30 PM IST');
+      expect(formatTimeIST('18:30')).toBe('5 AM IST');
+      expect(formatTimeIST(720)).toBe('10:30 PM IST');
+      expect(formatTimeIST(1110)).toBe('5 AM IST');
     });
 
-    it('formats date-only strings without backward timezone shift in America/New_York', () => {
+    it('handles winter (EST) vs summer (EDT) daylight saving correctly', () => {
+      // Winter (EST, UTC-5): 12:00 ET on 2026-11-20 -> 10:30 PM IST
+      expect(formatTimeIST('12:00', { referenceDate: '2026-11-20' })).toBe('10:30 PM IST');
+      expect(formatTimeIST('12:00', { referenceDate: '2026-11-17' })).toBe('10:30 PM IST');
+
+      // Summer (EDT, UTC-4): 12:00 ET on 2027-06-20 -> 9:30 PM IST
+      expect(formatTimeIST('12:00', { referenceDate: '2027-06-20' })).toBe('9:30 PM IST');
+      expect(formatTimeIST('12:00', { referenceDate: '2026-07-17' })).toBe('9:30 PM IST');
+    });
+
+    it('matches UTC ISO instant and ET slot string for the exact same moment', () => {
+      // Full-ISO UTC input (2026-11-20T17:00:00Z) and plain "12:00" ET on 2026-11-20 give identical IST result
+      const utcIsoResult = formatTimeIST('2026-11-20T17:00:00Z');
+      const etSlotResult = formatTimeIST('12:00', { referenceDate: '2026-11-20' });
+      expect(utcIsoResult).toBe('10:30 PM IST');
+      expect(etSlotResult).toBe('10:30 PM IST');
+      expect(utcIsoResult).toBe(etSlotResult);
+    });
+
+    it('preserves non-zero minutes accurately', () => {
+      // 12:00 EST -> 10:30 PM IST (:30 preserved)
+      expect(formatTimeIST('12:00', { referenceDate: '2026-11-20' })).toBe('10:30 PM IST');
+      // 12:15 EST -> 10:45 PM IST (:45 preserved)
+      expect(formatTimeIST('12:15', { referenceDate: '2026-11-20' })).toBe('10:45 PM IST');
+      // 12:45 EST -> 11:15 PM IST (:15 preserved)
+      expect(formatTimeIST('12:45', { referenceDate: '2026-11-20' })).toBe('11:15 PM IST');
+    });
+
+    it('handles slots that cross midnight into next day in IST', () => {
+      // 14:00 ET winter (2026-11-20) -> 12:30 AM IST on the next calendar day
+      expect(formatTimeIST('14:00', { referenceDate: '2026-11-20', showNextDay: true })).toBe('12:30 AM IST (+1 day)');
+      expect(formatTimeIST('14:00', { referenceDate: '2026-11-20', showNextDay: true, nextDaySuffix: ' (next day)' })).toBe('12:30 AM IST (next day)');
+
+      // 21:00 ET (9:00 PM EST) -> 07:30 AM IST on next day
+      expect(formatTimeIST('21:00', { referenceDate: '2026-11-17', showNextDay: true, nextDaySuffix: ' (next day)' })).toBe('7:30 AM IST (next day)');
+      expect(formatTimeIST('2026-11-17T21:00:00-05:00', { showNextDay: true, nextDaySuffix: ' (next day)' })).toBe('7:30 AM IST (next day)');
+      expect(formatDateIST('2026-11-17T21:00:00-05:00')).toBe('Wed, Nov 18');
+    });
+
+    it('accurately handles DST-change transition dates including 2026 and 2027', () => {
+      // 1. Day before spring-forward 2026 (EST, UTC-5)
+      expect(formatTimeIST('12:00', { referenceDate: '2026-03-07' })).toBe('10:30 PM IST');
+      // Day after spring-forward 2026 (EDT, UTC-4)
+      expect(formatTimeIST('12:00', { referenceDate: '2026-03-09' })).toBe('9:30 PM IST');
+
+      // 2. US DST start date Sunday 14 March 2027:
+      // Slots before transition (Saturday 13 March 2027, EST):
+      expect(formatTimeIST('12:00', { referenceDate: '2027-03-13' })).toBe('10:30 PM IST');
+      // On Sunday 14 March 2027 after 02:00 ET transition (EDT, UTC-4):
+      expect(formatTimeIST('12:00', { referenceDate: '2027-03-14' })).toBe('9:30 PM IST');
+      expect(formatTimeIST('14:00', { referenceDate: '2027-03-14' })).toBe('11:30 PM IST');
+      // Day after spring-forward (Monday 15 March 2027, EDT):
+      expect(formatTimeIST('12:00', { referenceDate: '2027-03-15' })).toBe('9:30 PM IST');
+
+      // 3. US DST end date Sunday 1 November 2026:
+      // Day before fall-back (Saturday 31 Oct 2026, EDT):
+      expect(formatTimeIST('12:00', { referenceDate: '2026-10-31' })).toBe('9:30 PM IST');
+      // On Sunday 1 November 2026 after 02:00 ET fall-back (EST, UTC-5):
+      expect(formatTimeIST('12:00', { referenceDate: '2026-11-01' })).toBe('10:30 PM IST');
+      // Day after fall-back (Monday 2 Nov 2026, EST):
+      expect(formatTimeIST('12:00', { referenceDate: '2026-11-02' })).toBe('10:30 PM IST');
+
+      // 4. US DST end date Sunday 7 November 2027:
+      // Day before fall-back (Saturday 6 Nov 2027, EDT):
+      expect(formatTimeIST('12:00', { referenceDate: '2027-11-06' })).toBe('9:30 PM IST');
+      // On Sunday 7 November 2027 after fall-back (EST, UTC-5):
+      expect(formatTimeIST('12:00', { referenceDate: '2027-11-07' })).toBe('10:30 PM IST');
+      // Day after fall-back (Monday 8 Nov 2027, EST):
+      expect(formatTimeIST('12:00', { referenceDate: '2027-11-08' })).toBe('10:30 PM IST');
+    });
+
+    it('converts user-entered IST back to ET HH:MM correctly', () => {
+      expect(istToETHHMM('2026-11-17', '22:30')).toBe('12:00');
+      expect(istToETHHMM('2026-11-17', '07:30')).toBe('21:00');
+      expect(istToETHHMM('2026-07-17', '21:30')).toBe('12:00');
+    });
+
+    it('formats date-only strings without backward timezone shift in Asia/Kolkata', () => {
       // YYYY-MM-DD date-only strings must not shift backwards into the previous calendar day
-      expect(formatDateET('2026-11-17')).toBe('Tue, Nov 17');
-      expect(formatDateET('2026-11-17', { month: 'short', day: 'numeric' })).toBe('Nov 17');
-      expect(formatWeekdayET('2026-11-17')).toBe('Tue');
+      expect(formatDateIST('2026-11-17')).toBe('Tue, Nov 17');
+      expect(formatDateIST('2026-11-17', { month: 'short', day: 'numeric' })).toBe('Nov 17');
+      expect(formatWeekdayIST('2026-11-17')).toBe('Tue');
 
       // Mon 16
-      expect(formatDateET('2026-11-16')).toBe('Mon, Nov 16');
-      expect(formatDateET('2026-11-16', { month: 'short', day: 'numeric' })).toBe('Nov 16');
-      expect(formatDateET('2026-11-16', { weekday: 'short', day: 'numeric' })).toBe('Mon 16');
-      expect(formatWeekdayET('2026-11-16')).toBe('Mon');
+      expect(formatDateIST('2026-11-16')).toBe('Mon, Nov 16');
+      expect(formatDateIST('2026-11-16', { month: 'short', day: 'numeric' })).toBe('Nov 16');
+      expect(formatDateIST('2026-11-16', { weekday: 'short', day: 'numeric' })).toBe('Mon 16');
+      expect(formatWeekdayIST('2026-11-16')).toBe('Mon');
 
       // Sun 15
-      expect(formatDateET('2026-11-15')).toBe('Sun, Nov 15');
-      expect(formatDateET('2026-11-15', { month: 'short', day: 'numeric' })).toBe('Nov 15');
-      expect(formatWeekdayET('2026-11-15')).toBe('Sun');
+      expect(formatDateIST('2026-11-15')).toBe('Sun, Nov 15');
+      expect(formatDateIST('2026-11-15', { month: 'short', day: 'numeric' })).toBe('Nov 15');
+      expect(formatWeekdayIST('2026-11-15')).toBe('Sun');
+    });
+
+    it('supports backward-compatible ET aliases', () => {
+      expect(formatTimeET('2026-11-17T12:00:00-05:00')).toBe('10:30 PM IST');
+      expect(formatDateET('2026-11-17')).toBe('Tue, Nov 17');
+      expect(formatWeekdayET('2026-11-17')).toBe('Tue');
+    });
+
+    it('displays pending run label and today badge correctly', () => {
+      // Simulate DaySummary format for pending run card
+      const pendingDay = {
+        date: '2026-11-20',
+        found: 0,
+        approved: 0,
+        is_today: true,
+        is_running: false,
+        pending_run: true,
+      };
+
+      const label = pendingDay.is_running
+        ? `${pendingDay.found} found so far`
+        : pendingDay.pending_run
+        ? 'Run scheduled for 7 AM IST'
+        : `${pendingDay.found} found · ${pendingDay.approved} kept`;
+
+      expect(label).toBe('Run scheduled for 7 AM IST');
+      expect(pendingDay.is_today).toBe(true);
     });
   });
 });

@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { Rail, type NavTab } from './components/Rail';
+import { ViewErrorBoundary } from './components/ViewErrorBoundary';
 import { AgentView } from './views/AgentView';
 import { ScheduleView } from './views/ScheduleView';
 import { YouTubeView } from './views/YouTubeView';
@@ -12,8 +13,17 @@ interface PipelineStatusData {
     uploaded?: number;
     scheduled?: number;
     failed?: number;
+    message?: string;
+    next_attempt_at?: string;
   } | null;
   next_run_time?: string;
+  last_task_error?: string;
+  reddit?: {
+    status: 'ok' | 'throttled' | 'blocked';
+    requests_today: number;
+    max_requests_per_day: number;
+    blocked_until?: string | null;
+  };
 }
 
 export const App: React.FC = () => {
@@ -60,16 +70,31 @@ export const App: React.FC = () => {
       {/* Main content view */}
       <main className="flex-1 flex flex-col min-h-screen overflow-x-hidden overflow-y-auto">
         {activeTab === 'agent' && (
-          <AgentView onSelectClipForYouTube={handleSelectClipForYouTube} />
+          <ViewErrorBoundary key="agent" viewName="Agent">
+            <AgentView
+              onSelectClipForYouTube={handleSelectClipForYouTube}
+              redditStatus={pipelineStatus?.reddit}
+            />
+          </ViewErrorBoundary>
         )}
-        {activeTab === 'schedule' && <ScheduleView />}
+        {activeTab === 'schedule' && (
+          <ViewErrorBoundary key="schedule" viewName="Schedule">
+            <ScheduleView />
+          </ViewErrorBoundary>
+        )}
         {activeTab === 'youtube' && (
-          <YouTubeView
-            initialPostId={targetClipForYouTube}
-            onClearInitialPostId={() => setTargetClipForYouTube(null)}
-          />
+          <ViewErrorBoundary key="youtube" viewName="YouTube">
+            <YouTubeView
+              initialPostId={targetClipForYouTube}
+              onClearInitialPostId={() => setTargetClipForYouTube(null)}
+            />
+          </ViewErrorBoundary>
         )}
-        {activeTab === 'claims' && <ClaimsView />}
+        {activeTab === 'claims' && (
+          <ViewErrorBoundary key="claims" viewName="Claims">
+            <ClaimsView />
+          </ViewErrorBoundary>
+        )}
       </main>
     </div>
   );

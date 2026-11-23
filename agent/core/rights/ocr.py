@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 from loguru import logger
 
-from core.rights.matcher import BlocklistMatcher, normalize_text
+from .matcher import BlocklistMatcher, normalize_text
 
 try:
     from rapidocr_onnxruntime import RapidOCR

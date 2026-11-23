@@ -8,7 +8,7 @@ from typing import Optional, Dict, Any, List
 from fastapi import APIRouter, Request, HTTPException, Response, status
 from fastapi.responses import FileResponse, StreamingResponse
 
-from dashboard.backend.db import get_ro_connection, WORKSPACE_DIR
+from dashboard.backend.db import get_ro_connection, WORKSPACE_DIR, dashboard_today
 from dashboard.backend.thumbs import resolve_video_path_for_post, get_or_generate_thumbnail, get_placeholder_thumbnail
 from dashboard.backend.youtube_api import fetch_live_video_stats
 
@@ -16,20 +16,22 @@ router = APIRouter(prefix="/api", tags=["youtube"])
 
 
 def resolve_date(date_param: str, tz_name: str = "America/New_York") -> str:
-    tz = ZoneInfo(tz_name)
-    now = datetime.now(tz)
+    """Resolve display date parameter relative to Asia/Kolkata dashboard date."""
+    today_ist = dashboard_today()
     s = (date_param or "today").strip().lower()
     if s in ("today", "now"):
-        return now.strftime("%Y-%m-%d")
+        return today_ist
     elif s in ("yesterday", "prev", "prev_day"):
-        return (now - timedelta(days=1)).strftime("%Y-%m-%d")
+        t_dt = datetime.strptime(today_ist, "%Y-%m-%d")
+        return (t_dt - timedelta(days=1)).strftime("%Y-%m-%d")
     elif s in ("tomorrow", "next_day"):
-        return (now + timedelta(days=1)).strftime("%Y-%m-%d")
+        t_dt = datetime.strptime(today_ist, "%Y-%m-%d")
+        return (t_dt + timedelta(days=1)).strftime("%Y-%m-%d")
     try:
         dt = datetime.strptime(s, "%Y-%m-%d")
         return dt.strftime("%Y-%m-%d")
     except ValueError:
-        return now.strftime("%Y-%m-%d")
+        return today_ist
 
 
 def resolve_publish_time(row: Dict[str, Any], live_info: Dict[str, Any]) -> tuple[Optional[datetime], str]:
@@ -79,11 +81,11 @@ def resolve_publish_time(row: Dict[str, Any], live_info: Dict[str, Any]) -> tupl
     if target_dt is None:
         return None, "recently"
 
-    ny_dt = target_dt.astimezone(ZoneInfo("America/New_York"))
-    if ny_dt.minute == 0:
-        time_text = f"{ny_dt.strftime('%I').lstrip('0')} {ny_dt.strftime('%p')} ET"
+    ist_dt = target_dt.astimezone(ZoneInfo("Asia/Kolkata"))
+    if ist_dt.minute == 0:
+        time_text = f"{ist_dt.strftime('%I').lstrip('0')} {ist_dt.strftime('%p')} IST"
     else:
-        time_text = f"{ny_dt.strftime('%I:%M %p').lstrip('0')} ET"
+        time_text = f"{ist_dt.strftime('%I:%M %p').lstrip('0')} IST"
 
     return target_dt, time_text
 
@@ -120,7 +122,11 @@ def determine_clip_status(row: Dict[str, Any], live_info: Dict[str, Any], now_ut
 
     target_dt, time_text = resolve_publish_time(row, live_info)
 
-    # 1. Scheduled (future publishAt / slot_time)
+    # 0. Local Queued (not yet uploaded to YouTube)
+    if not vid_id and not row.get("uploaded_at") and db_status not in ("uploaded", "published"):
+        return "Queued", f"Queued locally · Slot {time_text}"
+
+    # 1. Scheduled (future publishAt / slot_time on YouTube)
     if target_dt and target_dt > now_utc:
         if yt_privacy == "private" or yt_publish_at or db_status in ("scheduled", "queued", "uploaded"):
             return "Scheduled", f"Goes live at {time_text}"
@@ -221,18 +227,30 @@ def get_youtube_day(date: str):
                 pass
 
         slot_time_iso = r.get("slot_time") or ""
-        time_disp = "12 PM ET"
+        time_disp = "10:30 PM IST"
         try:
-            dt = datetime.fromisoformat(slot_time_iso).astimezone(ZoneInfo("America/New_York"))
-            if dt.minute == 0:
-                time_disp = f"{dt.strftime('%I').lstrip('0')} {dt.strftime('%p')} ET"
+            dt = datetime.fromisoformat(slot_time_iso)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=ZoneInfo("America/New_York"))
+            dt_ist = dt.astimezone(ZoneInfo("Asia/Kolkata"))
+            if dt_ist.minute == 0:
+                time_disp = f"{dt_ist.strftime('%I').lstrip('0')} {dt_ist.strftime('%p')} IST"
             else:
-                time_disp = f"{dt.strftime('%I:%M %p').lstrip('0')} ET"
+                time_disp = f"{dt_ist.strftime('%I:%M %p').lstrip('0')} IST"
         except Exception:
             h = r.get("slot_hour", 12)
-            period = "PM" if h >= 12 else "AM"
-            h12 = h % 12 or 12
-            time_disp = f"{h12} {period} ET"
+            try:
+                d_obj = datetime.strptime(target_date, "%Y-%m-%d")
+                dt_et = datetime(d_obj.year, d_obj.month, d_obj.day, h, 0, 0, tzinfo=ZoneInfo("America/New_York"))
+                dt_ist = dt_et.astimezone(ZoneInfo("Asia/Kolkata"))
+                if dt_ist.minute == 0:
+                    time_disp = f"{dt_ist.strftime('%I').lstrip('0')} {dt_ist.strftime('%p')} IST"
+                else:
+                    time_disp = f"{dt_ist.strftime('%I:%M %p').lstrip('0')} IST"
+            except Exception:
+                period = "PM" if h >= 12 else "AM"
+                h12 = h % 12 or 12
+                time_disp = f"{h12} {period} IST"
 
         items.append({
             "post_id": r["post_id"],
@@ -256,9 +274,14 @@ def get_youtube_day(date: str):
         })
 
     day_header = target_dt.strftime("%A %d %B")
+    now_ist = datetime.now(ZoneInfo("Asia/Kolkata"))
+    is_late_broadcast_window = (now_ist.hour < 7 or (now_ist.hour == 7 and now_ist.minute <= 30))
+
     return {
         "date": target_date,
+        "display_timezone": "Asia/Kolkata",
         "day_header": day_header,
+        "is_late_broadcast_window": is_late_broadcast_window,
         "published_count": published_count,
         "on_air_count": on_air_count,
         "scheduled_count": scheduled_count,

@@ -2,6 +2,7 @@ import os
 import json
 import sqlite3
 import time
+import sys
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -9,7 +10,12 @@ from typing import Optional, Dict, Any, List
 from loguru import logger
 
 
-DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "agent" / "data" / "agent.db"
+DEFAULT_DB_PATH = Path(
+    os.environ.get(
+        "AGENT_DB_PATH",
+        Path(__file__).resolve().parent.parent / "agent" / "data" / "agent.db"
+    )
+)
 
 
 @contextmanager
@@ -73,7 +79,26 @@ class UploadDatabase:
     """
 
     def __init__(self, db_path: Optional[Path] = None):
-        self.db_path = Path(db_path or DEFAULT_DB_PATH).resolve()
+        target = Path(db_path or os.environ.get("AGENT_DB_PATH") or DEFAULT_DB_PATH).resolve()
+
+        # Hard safety guard: under pytest or testing, NEVER touch the real agent/data/agent.db
+        is_testing = bool(
+            os.environ.get("PYTEST_CURRENT_TEST")
+            or os.environ.get("PYTEST_RUNNING")
+            or "pytest" in sys.modules
+            or os.environ.get("TESTING")
+        )
+        prod_db = (Path(__file__).resolve().parent.parent / "agent" / "data" / "agent.db").resolve()
+        if is_testing and target == prod_db:
+            alt = os.environ.get("AGENT_DB_PATH")
+            if alt and Path(alt).resolve() != prod_db:
+                target = Path(alt).resolve()
+            else:
+                import tempfile
+                target = (Path(tempfile.gettempdir()) / "pytest_agent_test.db").resolve()
+                logger.warning(f"TEST SAFETY GUARD: Redirected UploadDatabase from production {prod_db} to temporary {target}")
+
+        self.db_path = target
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
@@ -103,9 +128,15 @@ class UploadDatabase:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_uploads_date ON uploads(target_date);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_uploads_status ON uploads(status);")
 
-            # Migration for existing databases without pacific_date column
+            # Migration for existing databases without uploaded_at / pacific_date columns
             try:
-                conn.execute("ALTER TABLE uploads ADD COLUMN pacific_date TEXT;")
+                cols = [r[1] for r in conn.execute("PRAGMA table_info(uploads)").fetchall()]
+                if "uploaded_at" not in cols:
+                    conn.execute("ALTER TABLE uploads ADD COLUMN uploaded_at TEXT;")
+                if "attempts" not in cols:
+                    conn.execute("ALTER TABLE uploads ADD COLUMN attempts INTEGER DEFAULT 0;")
+                if "pacific_date" not in cols:
+                    conn.execute("ALTER TABLE uploads ADD COLUMN pacific_date TEXT;")
             except sqlite3.OperationalError:
                 pass
             conn.execute("CREATE INDEX IF NOT EXISTS idx_uploads_pacific_date ON uploads(pacific_date);")
@@ -131,10 +162,18 @@ class UploadDatabase:
                     uploaded INTEGER DEFAULT 0,
                     scheduled INTEGER DEFAULT 0,
                     failed INTEGER DEFAULT 0,
-                    message TEXT
+                    message TEXT,
+                    next_attempt_at TEXT
                 );
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_daily_runs_status ON daily_runs(status);")
+
+            try:
+                cols = [r[1] for r in conn.execute("PRAGMA table_info(daily_runs)").fetchall()]
+                if "next_attempt_at" not in cols:
+                    conn.execute("ALTER TABLE daily_runs ADD COLUMN next_attempt_at TEXT;")
+            except sqlite3.OperationalError:
+                pass
 
             # Backfill existing uploaded rows missing pacific_date
             rows = conn.execute("SELECT post_id, uploaded_at FROM uploads WHERE pacific_date IS NULL AND uploaded_at IS NOT NULL;").fetchall()
@@ -325,15 +364,16 @@ class UploadDatabase:
         scheduled: int = 0,
         failed: int = 0,
         message: str = "",
+        next_attempt_at: Optional[str] = None,
     ) -> None:
         """Update daily_runs upon run completion."""
         now = datetime.now().isoformat()
         with self._get_connection() as conn:
             conn.execute("""
                 UPDATE daily_runs
-                SET finished_at = ?, status = ?, uploaded = ?, scheduled = ?, failed = ?, message = ?
+                SET finished_at = ?, status = ?, uploaded = ?, scheduled = ?, failed = ?, message = ?, next_attempt_at = ?
                 WHERE id = ?
-            """, (now, status, uploaded, scheduled, failed, message, run_id))
+            """, (now, status, uploaded, scheduled, failed, message, next_attempt_at, run_id))
             conn.commit()
 
     def get_last_daily_run(self) -> Optional[Dict[str, Any]]:

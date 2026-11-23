@@ -44,27 +44,7 @@ def load_uploader_config() -> Dict[str, Any]:
     return {}
 
 
-def resolve_date_arg(date_str: str, timezone_name: str = "America/New_York") -> str:
-    """Resolve '--date tomorrow' or 'YYYY-MM-DD' in channel timezone."""
-    try:
-        tz = ZoneInfo(timezone_name)
-    except Exception:
-        tz = timezone.utc
-
-    now = datetime.now(tz)
-    s = (date_str or "tomorrow").strip().lower()
-
-    if s in ("tomorrow", "next_day"):
-        return (now + timedelta(days=1)).strftime("%Y-%m-%d")
-    elif s in ("today", "now"):
-        return now.strftime("%Y-%m-%d")
-
-    try:
-        dt = datetime.strptime(s, "%Y-%m-%d")
-        return dt.strftime("%Y-%m-%d")
-    except ValueError:
-        logger.warning(f"Unrecognized date '{date_str}'; defaulting to tomorrow in {timezone_name}")
-        return (now + timedelta(days=1)).strftime("%Y-%m-%d")
+from uploader.dates import resolve_date_arg, get_ist_today
 
 
 def cmd_auth(args):
@@ -373,8 +353,19 @@ def cmd_status(args):
 
     for r in rows:
         status_style = "green" if r["status"] in ("uploaded", "scheduled") else ("yellow" if r["status"] in ("pending", "uploading") else "red")
+        slot_raw = r.get("slot_time") or ""
+        slot_display = slot_raw
+        if slot_raw:
+            try:
+                s_dt = datetime.fromisoformat(slot_raw)
+                if s_dt.tzinfo is None:
+                    s_dt = s_dt.replace(tzinfo=ZoneInfo("America/New_York"))
+                ist_dt = s_dt.astimezone(ZoneInfo("Asia/Kolkata"))
+                slot_display = f"{slot_raw} ({ist_dt.strftime('%I:%M %p').lstrip('0')} IST)"
+            except Exception:
+                pass
         table.add_row(
-            r.get("slot_time") or "",
+            slot_display,
             r.get("post_id") or "",
             f"[{status_style}]{r.get('status')}[/{status_style}]",
             r.get("video_id") or "-",

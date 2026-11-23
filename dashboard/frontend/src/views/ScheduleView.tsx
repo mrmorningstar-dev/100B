@@ -1,8 +1,8 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { Minus, Plus, Trash2, Clock, Check, AlertCircle, Sparkles, RefreshCw } from 'lucide-react';
 import { Thumb } from '../components/Thumb';
 import { StatusPill } from '../components/StatusPill';
-import { formatTimeET } from '../utils/timeFormat';
+import { formatTimeIST, formatTimeETHint } from '../utils/timeFormat';
 import { stripHashtags } from '../utils/textFormat';
 import {
   parseHHMM,
@@ -33,21 +33,28 @@ interface ScheduleApiResponse {
   videos_per_day: number;
   slots: string[];
   timezone: string;
+  display_timezone?: string;
   tomorrow_date: string;
   tomorrow_day_name: string;
   tomorrow_slots: TomorrowSlotItem[];
   can_retime_live: boolean;
 }
 
-// Generate all 96 valid 15-minute time options in a day for the select dropdown (Channel ET)
-const TIME_OPTIONS: { value: string; label: string; minutes: number }[] = [];
-for (let m = 0; m <= 1425; m += 15) {
-  TIME_OPTIONS.push({
-    value: minutesToHHMM(m),
-    label: formatTimeET(m),
-    minutes: m,
-  });
-}
+// Generate valid 15-minute time options in a day for the select dropdown (shown in IST with matching ET hour)
+const getTimeOptions = (refDate?: string) => {
+  const options: { value: string; label: string; minutes: number }[] = [];
+  for (let m = 0; m <= 1425; m += 15) {
+    const etVal = minutesToHHMM(m);
+    const istLabel = formatTimeIST(m, { referenceDate: refDate, showNextDay: true });
+    const etHint = formatTimeETHint(etVal);
+    options.push({
+      value: etVal,
+      label: `${istLabel} (${etHint})`,
+      minutes: m,
+    });
+  }
+  return options;
+};
 
 export const ScheduleView: React.FC = () => {
   const [loading, setLoading] = useState(true);
@@ -72,6 +79,8 @@ export const ScheduleView: React.FC = () => {
   // Timeline dragging state
   const [activeDragIdx, setActiveDragIdx] = useState<number | null>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
+
+  const timeOptions = useMemo(() => getTimeOptions(tomorrowDate), [tomorrowDate]);
 
   const hasUnsavedChanges =
     videosPerDay !== savedCount ||
@@ -321,7 +330,7 @@ export const ScheduleView: React.FC = () => {
             )}
           </div>
           <p className="font-ui text-[14px] text-[#6F7A73] mt-[8px]">
-            Channel timezone: <span className="font-medium text-[#1D3B33]">{timezone} (ET)</span> · Auto-uploads and publishing timeline
+            Channel timezone: <span className="font-medium text-[#1D3B33]">{timezone}</span> · Displaying in <span className="font-medium text-[#2E7D4F]">IST (UTC+5:30)</span> · Scheduled slots map to ET broadcast hours
           </p>
         </div>
 
@@ -519,13 +528,14 @@ export const ScheduleView: React.FC = () => {
               const mins = parseHHMM(slotTime);
               const percent = (mins / 1440) * 100;
               const isDragging = activeDragIdx === idx;
+              const istLabel = formatTimeIST(mins, { referenceDate: tomorrowDate, showNextDay: true });
 
               return (
                 <div
                   key={`marker-${idx}`}
                   role="slider"
                   tabIndex={0}
-                  aria-label={`Slot ${idx + 1} at ${formatTimeET(mins)}`}
+                  aria-label={`Slot ${idx + 1} at ${istLabel} (${slotTime} ET)`}
                   aria-valuenow={mins}
                   aria-valuemin={0}
                   aria-valuemax={1425}
@@ -548,24 +558,24 @@ export const ScheduleView: React.FC = () => {
                     className={`absolute bottom-[36px] left-1/2 -translate-x-1/2 px-[8px] py-[3px] rounded-[6px] bg-[#1D3B33] text-white text-[11px] font-ui font-semibold whitespace-nowrap shadow-md pointer-events-none transition-opacity
                                 ${isDragging ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}
                   >
-                    {formatTimeET(mins)}
+                    {istLabel} · {slotTime} ET
                   </div>
                 </div>
               );
             })}
           </div>
 
-          {/* Hour labels below track */}
-          <div className="relative w-full h-[18px] text-[11px] font-ui text-[#6F7A73] flex justify-between px-[4px] mt-[4px]">
-            <span>12 AM ET</span>
-            <span>3 AM ET</span>
-            <span>6 AM ET</span>
-            <span>9 AM ET</span>
-            <span>12 PM ET</span>
-            <span>3 PM ET</span>
-            <span>6 PM ET</span>
-            <span>9 PM ET</span>
-            <span>12 AM ET</span>
+          {/* Hour labels below track (IST display times across broadcast day) */}
+          <div className="relative w-full h-[18px] text-[10.5px] font-ui text-[#6F7A73] flex justify-between px-[4px] mt-[4px]">
+            {[0, 3, 6, 9, 12, 15, 18, 21, 24].map((h, i) => {
+              const mins = (h % 24) * 60;
+              const label = formatTimeIST(mins, {
+                referenceDate: tomorrowDate,
+                omitZeroMinutes: false,
+                includeLabel: i === 0 || i === 8,
+              });
+              return <span key={h}>{label}</span>;
+            })}
           </div>
         </div>
       </div>
@@ -580,6 +590,9 @@ export const ScheduleView: React.FC = () => {
             <h2 className="font-heading font-extrabold text-[20px] text-[#1D3B33] mt-[2px]">
               Configured Slots ({slots.length})
             </h2>
+            <p className="font-ui text-[12.5px] text-[#6F7A73] mt-[2px]">
+              Slots are fixed to US (ET) hours so your US audience timing stays the same. IST times shift by 1 hour when US daylight saving changes.
+            </p>
           </div>
           {tomorrowDate && (
             <span className="font-ui text-[13px] text-[#6F7A73]">
@@ -612,14 +625,18 @@ export const ScheduleView: React.FC = () => {
                       aria-label={`Time for Slot ${idx + 1}`}
                       className="px-[12px] py-[8px] rounded-[8px] border border-[#D5DBD5] bg-white font-ui font-semibold text-[14px] text-[#1D3B33] hover:border-[#1D3B33] focus:outline-none focus:ring-2 focus:ring-[#2E7D4F] cursor-pointer appearance-none pr-[32px]"
                     >
-                      {TIME_OPTIONS.map((opt) => (
+                      {timeOptions.map((opt) => (
                         <option key={opt.value} value={opt.value}>
-                          {opt.label} ({opt.value})
+                          {opt.label}
                         </option>
                       ))}
                     </select>
                     <Clock className="size-[14px] text-[#6F7A73] absolute right-[10px] top-1/2 -translate-y-1/2 pointer-events-none" />
                   </div>
+
+                  <span className="hidden sm:inline font-ui text-[12px] text-[#6F7A73] bg-[#EDF0EC] px-[8px] py-[5px] rounded-[6px] shrink-0 font-medium">
+                    ({formatTimeETHint(slotTime)})
+                  </span>
                 </div>
 
                 {/* Center: Tomorrow's Assigned Clip preview */}

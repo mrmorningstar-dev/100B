@@ -178,9 +178,9 @@ def test_audio_checker_caps_and_samples():
     assert len(samples[0][1]) == 12 * 16000  # 12 seconds exactly
 
 
-def test_audd_provider_error_handling(monkeypatch):
+def test_fingerprint_provider_error_handling(monkeypatch):
     """
-    Test that AudD error responses (e.g. error 900: invalid token) are treated as provider errors:
+    Test that provider error responses (e.g. Shazam rate limit) are treated as provider errors:
     status = 'error', provider_errors incremented, reasons include 'provider_error_review',
     decision escalates to 'review', and errors counter is recorded.
     """
@@ -188,8 +188,8 @@ def test_audd_provider_error_handling(monkeypatch):
     mock_provider.recognize.return_value = {
         "status": "error",
         "recognized": False,
-        "error": "Recognition failed: authorization failed: the provided api_token is incorrect, invalid, or inactive.",
-        "error_code": 900,
+        "error": "Shazam request failed: HTTP 429 Too Many Requests",
+        "error_code": None,
     }
 
     mock_detector = MagicMock()
@@ -217,8 +217,8 @@ def test_audd_provider_error_handling(monkeypatch):
     assert audio_res["status"] == "error"
     assert audio_res["provider_calls_made"] == 1
     assert audio_res["provider_errors"] == 1
-    assert audio_res["provider_error_code"] == 900
-    assert "authorization failed" in audio_res["error"]
+    assert audio_res["provider_error_code"] is None
+    assert "429" in audio_res["error"]
 
     # Now verify RightsCheckEngine handles this audio_res
     mock_db = MagicMock()
@@ -238,7 +238,7 @@ def test_audd_provider_error_handling(monkeypatch):
     )
 
     eval_res = engine.evaluate_clip(
-        post_id="post_test_audd_err",
+        post_id="post_test_fingerprint_err",
         video_path="test_video.mp4",
         title="Test Clip",
     )
@@ -246,7 +246,7 @@ def test_audd_provider_error_handling(monkeypatch):
     assert "provider_error_review" in eval_res["reasons"]
     assert eval_res["decision"] == "review"
     # Ensure provider usage was incremented with errors
-    mock_db.increment_provider_usage.assert_called_with("audd", count=1, errors=1)
+    mock_db.increment_provider_usage.assert_called_with("shazam", count=1, errors=1)
 
 
 # ==============================================================================
@@ -628,3 +628,51 @@ def test_count_real_published_logic(test_db):
 
     # Overall real published clips: 2 (p_imm and p_past)
     assert test_db.count_real_published() == 2
+
+
+def test_shazam_provider_parses_match_no_match_and_errors(monkeypatch):
+    import core.rights.audio_check as ac_mod
+    from core.rights.audio_check import ShazamProvider
+
+    monkeypatch.setattr(ac_mod, "_HAS_SHAZAMIO", True)
+    monkeypatch.setattr(ShazamProvider, "MIN_INTERVAL_S", 0.0)
+    provider = ShazamProvider()
+
+    match = {
+        "track": {
+            "title": "Fortunate Son",
+            "subtitle": "Creedence Clearwater Revival",
+            "sections": [
+                {"metadata": [
+                    {"title": "Album", "text": "Willy and the Poor Boys"},
+                    {"title": "Label", "text": "Fantasy"},
+                    {"title": "Released", "text": "1969"},
+                ]}
+            ],
+        }
+    }
+
+    async def fake_match(wav):
+        return match
+
+    monkeypatch.setattr(ShazamProvider, "_recognize_async", staticmethod(fake_match))
+    res = provider.recognize(b"fake-wav")
+    assert res["status"] == "success" and res["recognized"] is True
+    assert res["title"] == "Fortunate Son"
+    assert res["artist"] == "Creedence Clearwater Revival"
+    assert res["label"] == "Fantasy"
+    assert res["release_date"] == "1969"
+
+    async def fake_no_match(wav):
+        return {"matches": []}
+
+    monkeypatch.setattr(ShazamProvider, "_recognize_async", staticmethod(fake_no_match))
+    assert provider.recognize(b"fake-wav") == {"status": "success", "recognized": False}
+
+    async def fake_boom(wav):
+        raise RuntimeError("429 Too Many Requests")
+
+    monkeypatch.setattr(ShazamProvider, "_recognize_async", staticmethod(fake_boom))
+    res = provider.recognize(b"fake-wav")
+    assert res["status"] == "error" and res["recognized"] is False
+    assert "429" in res["error"]

@@ -1,9 +1,10 @@
 import os
+import re
 import json
 import shutil
 import sqlite3
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from typing import Optional, Dict, Any, List
 
@@ -221,41 +222,149 @@ def rollback_local_retimed_data(
                 pass
 
 
-def get_next_run_time_from_scheduler() -> Optional[str]:
+def dashboard_today(now: Optional[datetime] = None) -> str:
+    """Return today's date in Asia/Kolkata as YYYY-MM-DD."""
+    from uploader.dates import get_ist_today
+    return get_ist_today(now=now)
+
+
+def classify_task_result(code: Optional[int]) -> Optional[str]:
     """
-    Read the next scheduled run time from Windows Task Scheduler for '\100B Daily Video Bot',
-    converting from system local time to America/New_York ISO format.
+    Turn a Windows Task Scheduler LastTaskResult into an error message, or None.
+
+    - 0 = success.
+    - 0x0004xxxx = informational (running, not yet run, ready, ...), not an error.
+    - Small values (below 0x10000) are the exit code of run_daily.py itself. The task DID start;
+      the run summary already shows whether the pipeline failed, so no "failed to start" message.
+    - 0xC0000000 and above = the process crashed (NTSTATUS).
+    - Other 0x8xxxxxxx values = Windows could not launch the task (for example 0x8007010B,
+      "directory name is invalid").
+    """
+    if code is None:
+        return None
+    try:
+        code = int(code) & 0xFFFFFFFF
+    except (TypeError, ValueError):
+        return None
+    if code == 0 or 0x00040000 <= code < 0x00050000 or code < 0x10000:
+        return None
+    if code >= 0xC0000000:
+        return f"Daily task crashed (0x{code:08X})"
+    return f"Daily task failed to start (0x{code:08X})"
+
+
+def get_task_scheduler_info() -> Dict[str, Any]:
+    """
+    Query Windows Task Scheduler for the daily video bot task via PowerShell Get-ScheduledTaskInfo.
+    Returns:
+        {
+            "next_run_iso": Optional[str],
+            "last_task_result": Optional[int],
+            "last_task_error": Optional[str],
+        }
     """
     if os.name != "nt":
-        return None
+        return {"next_run_iso": None, "last_task_result": None, "last_task_error": None}
+
+    task_name = "100B Daily Video Bot"
+    try:
+        cfg_path = WORKSPACE_DIR / "agent" / "config.yaml"
+        if cfg_path.is_file():
+            import yaml
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                c = yaml.safe_load(f) or {}
+                task_name = c.get("daily_run", {}).get("task_name", task_name)
+    except Exception:
+        pass
+
     try:
         import subprocess
         proc = subprocess.run(
-            ["schtasks", "/query", "/tn", r"\100B Daily Video Bot", "/fo", "LIST"],
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", f"Get-ScheduledTaskInfo -TaskName '{task_name}' | ConvertTo-Json"],
             capture_output=True,
             text=True,
-            timeout=3,
+            timeout=4,
         )
-        if proc.returncode == 0:
-            for line in proc.stdout.splitlines():
-                if line.strip().startswith("Next Run Time:"):
-                    val = line.split(":", 1)[1].strip()
-                    # e.g., '17-11-2026 18:00:00'
-                    try:
-                        dt_local = datetime.strptime(val, "%d-%m-%Y %H:%M:%S").replace(
-                            tzinfo=datetime.now().astimezone().tzinfo
-                        )
-                        dt_ny = dt_local.astimezone(ZoneInfo("America/New_York"))
-                        return dt_ny.isoformat()
-                    except Exception:
-                        pass
+        if proc.returncode != 0:
+            return {
+                "next_run_iso": None,
+                "last_task_result": None,
+                "last_task_error": f"Daily task '{task_name}' failed to start or not found",
+            }
+
+        data = json.loads(proc.stdout.strip())
+        next_run_raw = data.get("NextRunTime")
+        next_run_iso = None
+        if next_run_raw:
+            m = re.search(r"/Date\((\d+)\)/", str(next_run_raw))
+            if m:
+                ts = int(m.group(1)) / 1000.0
+                dt_ist = datetime.fromtimestamp(ts, tz=timezone.utc).astimezone(ZoneInfo("Asia/Kolkata"))
+                next_run_iso = dt_ist.isoformat()
+            else:
+                try:
+                    dt = datetime.fromisoformat(str(next_run_raw))
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
+                    next_run_iso = dt.isoformat()
+                except Exception:
+                    pass
+
+        last_result = data.get("LastTaskResult")
+        last_error = classify_task_result(last_result)
+
+        return {
+            "next_run_iso": next_run_iso,
+            "last_task_result": last_result,
+            "last_task_error": last_error,
+        }
+    except Exception:
+        return {
+            "next_run_iso": None,
+            "last_task_result": None,
+            "last_task_error": None,
+        }
+
+
+def get_fallback_next_run_time() -> str:
+    """
+    Fallback when the Windows task cannot be read:
+    Compute next time_ist in Asia/Kolkata from agent/config.yaml (defaults to 07:00).
+    """
+    time_ist = "07:00"
+    try:
+        cfg_path = WORKSPACE_DIR / "agent" / "config.yaml"
+        if cfg_path.is_file():
+            import yaml
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                c = yaml.safe_load(f) or {}
+                time_ist = c.get("daily_run", {}).get("time_ist", "07:00")
     except Exception:
         pass
-    return None
+
+    try:
+        parts = time_ist.strip().split(":")
+        th = int(parts[0])
+        tm = int(parts[1]) if len(parts) > 1 else 0
+    except Exception:
+        th, tm = 7, 0
+
+    tz_ist = ZoneInfo("Asia/Kolkata")
+    now_ist = datetime.now(tz_ist)
+    target_dt = now_ist.replace(hour=th, minute=tm, second=0, microsecond=0)
+    if now_ist >= target_dt:
+        target_dt += timedelta(days=1)
+    return target_dt.isoformat()
+
+
+def get_next_run_time_from_scheduler() -> Optional[str]:
+    """Compatibility alias returning next run ISO."""
+    info = get_task_scheduler_info()
+    return info.get("next_run_iso")
 
 
 def get_pipeline_status() -> Dict[str, Any]:
-    """Return last run info from daily_runs and next run time."""
+    """Return last run info from daily_runs, next run time, and task scheduler health."""
     with get_ro_connection() as conn:
         try:
             row = conn.execute("""
@@ -266,6 +375,7 @@ def get_pipeline_status() -> Dict[str, Any]:
 
     last_run = None
     if row:
+        row_keys = row.keys() if hasattr(row, "keys") else []
         last_run = {
             "id": row["id"],
             "started_at": row["started_at"],
@@ -275,26 +385,68 @@ def get_pipeline_status() -> Dict[str, Any]:
             "scheduled": row["scheduled"],
             "failed": row["failed"],
             "message": row["message"],
+            "next_attempt_at": row["next_attempt_at"] if "next_attempt_at" in row_keys else None,
         }
 
-    # Channel timezone (America/New_York)
-    scheduler_next_run = get_next_run_time_from_scheduler()
-    if scheduler_next_run:
-        next_run_iso = scheduler_next_run
-    else:
-        # Fallback: daily run is at 18:00 IST = 07:30 AM New York time
-        from datetime import timedelta
-        tz = ZoneInfo("America/New_York")
-        now_ny = datetime.now(tz)
-        next_run_dt = now_ny.replace(hour=7, minute=30, second=0, microsecond=0)
-        if now_ny >= next_run_dt:
-            next_run_dt += timedelta(days=1)
-        next_run_iso = next_run_dt.isoformat()
+    task_info = get_task_scheduler_info()
+    next_run_iso = task_info.get("next_run_iso") or get_fallback_next_run_time()
+    last_task_result = task_info.get("last_task_result")
+    last_task_error = task_info.get("last_task_error")
+
+    # Reddit Breaker / Request status
+    reddit_status = {
+        "status": "ok",
+        "requests_today": 0,
+        "max_requests_per_day": 80,
+        "blocked_until": None,
+    }
+    vdb_path = WORKSPACE_DIR / "scraper" / "data" / "videos.db"
+    if vdb_path.is_file():
+        try:
+            vconn = sqlite3.connect(f"file:{vdb_path.resolve()}?mode=ro", uri=True, timeout=5.0)
+            vconn.row_factory = sqlite3.Row
+            today_ist = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d")
+
+            req_row = vconn.execute(
+                "SELECT COUNT(*) as cnt FROM request_log WHERE day = ? AND host = 'reddit'",
+                (today_ist,)
+            ).fetchone()
+            req_today = int(req_row["cnt"]) if req_row else 0
+            reddit_status["requests_today"] = req_today
+
+            b_rows = vconn.execute("SELECT * FROM reddit_breaker").fetchall()
+            now_utc = datetime.now(timezone.utc)
+            active_blocks = []
+            for b in b_rows:
+                b_until = b["blocked_until"]
+                if b_until:
+                    try:
+                        b_dt = datetime.fromisoformat(b_until)
+                        if b_dt.tzinfo is None:
+                            b_dt = b_dt.replace(tzinfo=timezone.utc)
+                        if b_dt > now_utc:
+                            ist_dt = b_dt.astimezone(ZoneInfo("Asia/Kolkata"))
+                            active_blocks.append(f"{b['layer']} blocked until {ist_dt.strftime('%I:%M %p IST').lstrip('0')}")
+                    except Exception:
+                        pass
+
+            if active_blocks:
+                reddit_status["status"] = "blocked"
+                reddit_status["blocked_until"] = "; ".join(active_blocks)
+            elif req_today >= 70:
+                reddit_status["status"] = "throttled"
+            vconn.close()
+        except Exception:
+            pass
 
     return {
         "last_run": last_run,
         "next_run_time": next_run_iso,
+        "last_task_result": last_task_result,
+        "last_task_error": last_task_error,
         "channel_timezone": "America/New_York",
+        "display_timezone": "Asia/Kolkata",
+        "reddit": reddit_status,
     }
 
 
@@ -328,13 +480,12 @@ def is_pipeline_active() -> bool:
 def get_agent_days(num_days: int = 7) -> List[Dict[str, Any]]:
     """
     Return summary statistics for the last `num_days` days for the day picker.
-    Ends strictly at today (channel timezone America/New_York) so future test dates
-    are not shown in the picker. Starts with today selected.
+    Ends strictly at dashboard_today() (today in Asia/Kolkata).
+    Starts with today selected.
     """
     from datetime import timedelta
-    tz = ZoneInfo("America/New_York")
-    now_ny = datetime.now(tz)
-    today_str = now_ny.strftime("%Y-%m-%d")
+    today_str = dashboard_today()
+    today_dt = datetime.strptime(today_str, "%Y-%m-%d")
 
     with get_ro_connection() as conn:
         dates_set = set()
@@ -368,7 +519,7 @@ def get_agent_days(num_days: int = 7) -> List[Dict[str, Any]]:
 
         # Ensure contiguous num_days strip ending at today
         for offset in range(-(num_days - 1), 1):
-            dates_set.add((now_ny + timedelta(days=offset)).strftime("%Y-%m-%d"))
+            dates_set.add((today_dt + timedelta(days=offset)).strftime("%Y-%m-%d"))
 
         # Take the last num_days ending at today
         valid_dates = [d for d in dates_set if d <= today_str]
@@ -382,34 +533,92 @@ def get_agent_days(num_days: int = 7) -> List[Dict[str, Any]]:
             day_data = _get_day_stats_internal(conn, d)
             day_data["date"] = d
             day_data["is_today"] = (d == today_str)
-            if d == today_str and is_running:
-                day_data["is_running"] = True
+            day_data["is_running"] = (d == today_str and is_running)
+
+            if d == today_str and not is_running and day_data.get("found", 0) == 0 and day_data.get("approved", 0) == 0:
+                day_data["pending_run"] = True
             else:
-                day_data["is_running"] = False
+                day_data["pending_run"] = False
+
             results.append(day_data)
 
     return results
 
 
 def _get_day_stats_internal(conn: sqlite3.Connection, target_date: str) -> Dict[str, Any]:
-    """Helper to get stats from run_stats or fallback to agent_decisions."""
-    # 1. Try latest run_stats row for this date
+    """Helper to get stats from run_stats (aggregating all runs for target_date) or fallback to agent_decisions."""
+    # 1. Try run_stats rows for this date (aggregate all passes/runs for the date)
     try:
-        row = conn.execute("""
+        rows = conn.execute("""
             SELECT * FROM run_stats
             WHERE target_date = ?
-            ORDER BY id DESC LIMIT 1
-        """, (target_date,)).fetchone()
-        if row:
-            d = dict(row)
-            for k in ("reject_reasons_json", "source_stats_json"):
-                if isinstance(d.get(k), str):
-                    try:
-                        d[k] = json.loads(d[k])
-                    except Exception:
-                        d[k] = {}
-            d["estimated"] = False
-            return d
+            ORDER BY id ASC
+        """, (target_date,)).fetchall()
+        if rows:
+            total_found = sum(r["found"] for r in rows)
+            total_approved = sum(r["approved"] for r in rows)
+            total_selected = sum(r["selected"] for r in rows)
+            total_downloaded = sum(r["downloaded"] for r in rows)
+            total_judged = sum(r["judged"] for r in rows)
+            total_rejected = sum(r["rejected_judge"] for r in rows)
+            total_dropped_prescreen = sum(r["dropped_prescreen"] for r in rows)
+            total_dropped_duration = sum(r["dropped_duration"] for r in rows)
+            total_dropped_filters = sum(r["dropped_filters"] for r in rows)
+            total_borderline = sum(r["borderline"] for r in rows)
+            total_reserve_added = sum(r["reserve_added"] for r in rows)
+
+            merged_reasons: Dict[str, Any] = {}
+            merged_sources: Dict[str, Any] = {}
+            for r in rows:
+                for k, merged in (("reject_reasons_json", merged_reasons), ("source_stats_json", merged_sources)):
+                    val = r[k]
+                    data = {}
+                    if isinstance(val, str):
+                        try:
+                            data = json.loads(val)
+                        except Exception:
+                            data = {}
+                    elif isinstance(val, dict):
+                        data = val
+                    for subk, subv in data.items():
+                        if isinstance(subv, (int, float)):
+                            merged[subk] = merged.get(subk, 0) + subv
+                        elif isinstance(subv, dict):
+                            merged.setdefault(subk, {})
+                            for ssubk, ssubv in subv.items():
+                                if isinstance(ssubv, (int, float)):
+                                    merged[subk][ssubk] = merged[subk].get(ssubk, 0) + ssubv
+
+            # Reconcile with actual schedule table count if present
+            try:
+                sched_row = conn.execute("SELECT COUNT(*) as cnt FROM schedule WHERE target_date = ? AND status != 'empty'", (target_date,)).fetchone()
+                actual_scheduled = sched_row["cnt"] if sched_row else total_selected
+                if actual_scheduled > total_approved:
+                    total_approved = actual_scheduled
+                if actual_scheduled > total_found:
+                    total_found = actual_scheduled
+            except Exception:
+                actual_scheduled = total_selected
+
+            return {
+                "id": rows[-1]["id"],
+                "target_date": target_date,
+                "found": total_found,
+                "dropped_prescreen": total_dropped_prescreen,
+                "dropped_duration": total_dropped_duration,
+                "downloaded": total_downloaded,
+                "dropped_filters": total_dropped_filters,
+                "judged": total_judged,
+                "rejected_judge": total_rejected,
+                "borderline": total_borderline,
+                "approved": total_approved,
+                "selected": actual_scheduled,
+                "reserve_added": total_reserve_added,
+                "reject_reasons_json": merged_reasons,
+                "source_stats_json": merged_sources,
+                "created_at": rows[-1]["created_at"],
+                "estimated": False,
+            }
     except sqlite3.OperationalError:
         pass
 
@@ -582,21 +791,33 @@ def get_agent_day_detail(target_date: str) -> Dict[str, Any]:
 
         lineup_target_date = next_date if has_next_date_lineup else target_date
 
-        # Format time_display in America/New_York (ET)
+        # Format time_display in Asia/Kolkata (IST)
         for idx, r in enumerate(lineup_rows):
             slot_iso = r.get("slot_time") or ""
-            time_disp = "12 PM ET"
+            time_disp = "10:30 PM IST"
             try:
-                dt_iso = datetime.fromisoformat(slot_iso).astimezone(ZoneInfo("America/New_York"))
-                if dt_iso.minute == 0:
-                    time_disp = f"{dt_iso.strftime('%I').lstrip('0')} {dt_iso.strftime('%p')} ET"
+                dt_iso = datetime.fromisoformat(slot_iso)
+                if dt_iso.tzinfo is None:
+                    dt_iso = dt_iso.replace(tzinfo=ZoneInfo("America/New_York"))
+                dt_ist = dt_iso.astimezone(ZoneInfo("Asia/Kolkata"))
+                if dt_ist.minute == 0:
+                    time_disp = f"{dt_ist.strftime('%I').lstrip('0')} {dt_ist.strftime('%p')} IST"
                 else:
-                    time_disp = f"{dt_iso.strftime('%I:%M %p').lstrip('0')} ET"
+                    time_disp = f"{dt_ist.strftime('%I:%M %p').lstrip('0')} IST"
             except Exception:
                 h = r.get("slot_hour", 12 + idx)
-                period = "PM" if h >= 12 else "AM"
-                h12 = h % 12 or 12
-                time_disp = f"{h12} {period} ET"
+                try:
+                    d_obj = datetime.strptime(lineup_target_date, "%Y-%m-%d")
+                    dt_et = datetime(d_obj.year, d_obj.month, d_obj.day, h, 0, 0, tzinfo=ZoneInfo("America/New_York"))
+                    dt_ist = dt_et.astimezone(ZoneInfo("Asia/Kolkata"))
+                    if dt_ist.minute == 0:
+                        time_disp = f"{dt_ist.strftime('%I').lstrip('0')} {dt_ist.strftime('%p')} IST"
+                    else:
+                        time_disp = f"{dt_ist.strftime('%I:%M %p').lstrip('0')} IST"
+                except Exception:
+                    period = "PM" if h >= 12 else "AM"
+                    h12 = h % 12 or 12
+                    time_disp = f"{h12} {period} IST"
             r["time_display"] = time_disp
             r["thumb_url"] = f"/api/thumbs/{r['post_id']}.jpg"
 

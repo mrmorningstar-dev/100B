@@ -128,21 +128,33 @@ def get_schedule():
                 d = dict(r)
                 # Parse slot time string to HH:MM ET
                 slot_iso = d.get("slot_time") or ""
-                time_disp = "12 PM ET"
+                time_disp = "10:30 PM IST"
                 slot_hhmm = "12:00"
                 try:
-                    dt = datetime.fromisoformat(slot_iso).astimezone(ZoneInfo("America/New_York"))
-                    slot_hhmm = f"{dt.hour:02d}:{dt.minute:02d}"
-                    if dt.minute == 0:
-                        time_disp = f"{dt.strftime('%I').lstrip('0')} {dt.strftime('%p')} ET"
+                    dt = datetime.fromisoformat(slot_iso)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=ZoneInfo("America/New_York"))
+                    dt_ny = dt.astimezone(ZoneInfo("America/New_York"))
+                    slot_hhmm = f"{dt_ny.hour:02d}:{dt_ny.minute:02d}"
+                    dt_ist = dt.astimezone(ZoneInfo("Asia/Kolkata"))
+                    if dt_ist.minute == 0:
+                        time_disp = f"{dt_ist.strftime('%I').lstrip('0')} {dt_ist.strftime('%p')} IST"
                     else:
-                        time_disp = f"{dt.strftime('%I:%M %p').lstrip('0')} ET"
+                        time_disp = f"{dt_ist.strftime('%I:%M %p').lstrip('0')} IST"
                 except Exception:
                     h = d.get("slot_hour", 12)
-                    period = "PM" if h >= 12 else "AM"
-                    h12 = h % 12 or 12
-                    time_disp = f"{h12} {period} ET"
                     slot_hhmm = f"{h:02d}:00"
+                    try:
+                        dt_et = datetime(tomorrow_dt.year, tomorrow_dt.month, tomorrow_dt.day, h, 0, 0, tzinfo=ZoneInfo("America/New_York"))
+                        dt_ist = dt_et.astimezone(ZoneInfo("Asia/Kolkata"))
+                        if dt_ist.minute == 0:
+                            time_disp = f"{dt_ist.strftime('%I').lstrip('0')} {dt_ist.strftime('%p')} IST"
+                        else:
+                            time_disp = f"{dt_ist.strftime('%I:%M %p').lstrip('0')} IST"
+                    except Exception:
+                        period = "PM" if h >= 12 else "AM"
+                        h12 = h % 12 or 12
+                        time_disp = f"{h12} {period} IST"
                 d["slot_hhmm"] = slot_hhmm
                 d["time_display"] = time_disp
                 d["thumb_url"] = f"/api/thumbs/{d['post_id']}.jpg"
@@ -154,6 +166,7 @@ def get_schedule():
         "videos_per_day": target_count,
         "slots": sorted_slots,
         "timezone": tz_name,
+        "display_timezone": "Asia/Kolkata",
         "tomorrow_date": tomorrow_str,
         "tomorrow_day_name": tomorrow_dt.strftime("%A"),
         "tomorrow_slots": tomorrow_slots,

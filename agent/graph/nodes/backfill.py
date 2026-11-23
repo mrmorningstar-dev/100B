@@ -145,6 +145,16 @@ def backfill_node(state: CurationState, db: AgentDatabase) -> Dict[str, Any]:
 
         remaining_shortage = target_count - len(approved)
         if remaining_shortage > 0:
+            if state.get("scraper_blocked") or state.get("scraper_error"):
+                logger.info(
+                    f"Reserve pool insufficient (short {remaining_shortage}), but scraper is blocked or crashed. "
+                    "Not triggering extra loop through PLAN."
+                )
+                return {
+                    "approved": approved,
+                    "backfill_performed": True,
+                    "trigger_extra_loop": False,
+                }
             logger.info(
                 f"Reserve pool insufficient (still short {remaining_shortage}). "
                 "Triggering one final extra loop through PLAN."

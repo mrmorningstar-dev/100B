@@ -159,3 +159,28 @@ def test_purge_old_media_skips_available_reserve_pool_clips(tmp_path):
     assert not reserve_vid.exists(), "Used reserve pool clip can now be purged"
     assert res2["purged_files"] == 1
 
+
+def test_production_database_safety_guard():
+    """
+    Verify that initializing UploadDatabase or AgentDatabase without explicit path
+    under pytest or testing NEVER touches the real production database (agent/data/agent.db),
+    and is automatically redirected to a temporary test database.
+    """
+    from uploader.db import UploadDatabase
+    from agent.core.db import AgentDatabase
+
+    prod_db = (Path(__file__).resolve().parent.parent.parent / "agent" / "data" / "agent.db").resolve()
+
+    # 1. UploadDatabase with no args
+    up_db = UploadDatabase()
+    assert up_db.db_path != prod_db
+    assert up_db.db_path.exists()
+
+    # 2. UploadDatabase explicitly passing prod_db path during test
+    up_db_forced = UploadDatabase(prod_db)
+    assert up_db_forced.db_path != prod_db
+
+    # 3. AgentDatabase explicitly passing prod_db path during test
+    agent_db_forced = AgentDatabase(prod_db)
+    assert agent_db_forced.db_path != prod_db
+

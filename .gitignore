@@ -29,7 +29,9 @@ daily_run.lock
 *.sqlite3
 scraper/data/*.db
 scraper/data/test_curl.json
+scraper/data/http_cache/
 agent/data/*.db
+agent/data/*.json
 dashboard/cache/
 
 # --- Media & Video Artifacts (Raw & Rendered) ---
@@ -123,6 +125,11 @@ desktop.ini
 
 # --- Backup & Temp files ---
 .pytest_tmp/
+.pytest_tmp_root/
+.pt_dash/
+.pt_root/
+.pt_scr/
+backups/
 *.bak
 *.bak_*
 *.swp

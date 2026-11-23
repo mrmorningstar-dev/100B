@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { ScoreChip } from '../components/ScoreChip';
 import { Thumb } from '../components/Thumb';
-import { formatTimeET, formatDateET } from '../utils/timeFormat';
+import { ClaimChip } from '../components/ClaimChip';
+import { formatTimeIST, formatDateIST, formatTimeETHint } from '../utils/timeFormat';
 import { stripHashtags } from '../utils/textFormat';
 
 interface DaySummary {
@@ -11,6 +12,7 @@ interface DaySummary {
   rejected?: number;
   is_running?: boolean;
   is_today?: boolean;
+  pending_run?: boolean;
 }
 
 interface LineupItem {
@@ -22,6 +24,7 @@ interface LineupItem {
   source_url?: string;
   hybrid_score: number;
   thumb_url?: string;
+  claim_status?: string;
 }
 
 interface ReserveItem {
@@ -54,9 +57,15 @@ interface AgentDetailData {
 
 interface AgentViewProps {
   onSelectClipForYouTube?: (postId: string) => void;
+  redditStatus?: {
+    status: 'ok' | 'throttled' | 'blocked';
+    requests_today: number;
+    max_requests_per_day: number;
+    blocked_until?: string | null;
+  };
 }
 
-export const AgentView: React.FC<AgentViewProps> = ({ onSelectClipForYouTube }) => {
+export const AgentView: React.FC<AgentViewProps> = ({ onSelectClipForYouTube, redditStatus }) => {
   const [days, setDays] = useState<DaySummary[]>([]);
   const [selectedDate, setSelectedDate] = useState<string>('');
   const [detail, setDetail] = useState<AgentDetailData | null>(null);
@@ -64,17 +73,18 @@ export const AgentView: React.FC<AgentViewProps> = ({ onSelectClipForYouTube }) 
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Fetch 7-day picker
+  // Fetch 7-day picker and refresh every minute to follow IST date shifts
   useEffect(() => {
     let isMounted = true;
-    async function loadDays() {
+    async function loadDays(isBackground = false) {
       try {
+        if (!isBackground) setLoadingDays(true);
         const resp = await fetch('/api/agent/days?days=7');
         if (!resp.ok) throw new Error('Failed to fetch days');
         const data = await resp.json();
         if (isMounted) {
           setDays(data);
-          if (data.length > 0) {
+          if (data.length > 0 && !isBackground) {
             // Start with today selected
             const todayEntry = data.find((d: DaySummary) => d.is_today);
             if (todayEntry) {
@@ -83,17 +93,26 @@ export const AgentView: React.FC<AgentViewProps> = ({ onSelectClipForYouTube }) 
               setSelectedDate(data[data.length - 1].date);
             }
           }
-          setLoadingDays(false);
+          if (!isBackground) setLoadingDays(false);
         }
       } catch (err: any) {
         if (isMounted) {
-          setError(err.message);
-          setLoadingDays(false);
+          if (!isBackground) setError(err.message);
+          if (!isBackground) setLoadingDays(false);
         }
       }
     }
     loadDays();
-    return () => { isMounted = false; };
+
+    // Re-check every minute so day strip rolls over cleanly when IST date changes
+    const interval = setInterval(() => {
+      loadDays(true);
+    }, 60000);
+
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
   }, []);
 
   // Fetch detail for selected date
@@ -126,8 +145,8 @@ export const AgentView: React.FC<AgentViewProps> = ({ onSelectClipForYouTube }) 
   const formattedDateTitle = React.useMemo(() => {
     if (!selectedDate) return 'Saturday 14 November';
     try {
-      const dt = new Date(`${selectedDate}T12:00:00-05:00`);
-      return dt.toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'long', day: 'numeric', month: 'long' });
+      const dt = new Date(`${selectedDate}T12:00:00Z`);
+      return dt.toLocaleDateString('en-US', { timeZone: 'Asia/Kolkata', weekday: 'long', day: 'numeric', month: 'long' });
     } catch {
       return selectedDate;
     }
@@ -135,7 +154,7 @@ export const AgentView: React.FC<AgentViewProps> = ({ onSelectClipForYouTube }) 
 
   // Format day picker card label: e.g. "Sun 8"
   const formatPickerLabel = (dateStr: string) => {
-    return formatDateET(dateStr, { weekday: 'short', day: 'numeric' });
+    return formatDateIST(dateStr, { weekday: 'short', day: 'numeric' });
   };
 
   // Funnel calculations
@@ -165,7 +184,7 @@ export const AgentView: React.FC<AgentViewProps> = ({ onSelectClipForYouTube }) 
     rights_visual_match: 'Visual match on web',
     rights_history: 'Claim history / duplicate',
     rights_social_watermark: 'Social watermark (TikTok/IG/FB)',
-    provider_error_review: 'Provider error (AudD/Vision)',
+    provider_error_review: 'Provider error (Shazam/Vision)',
     rights_music_unrecognized: 'Unrecognized music (needs review)',
     other: 'Other criteria',
   };
@@ -193,20 +212,53 @@ export const AgentView: React.FC<AgentViewProps> = ({ onSelectClipForYouTube }) 
   return (
     <div className="flex-1 flex flex-col gap-[28px] p-[20px] lg:p-[40px] max-w-[1400px] w-full mx-auto pb-[100px] md:pb-[40px]">
       {/* Header */}
-      <div className="flex flex-col gap-[6px]">
-        <div className="flex items-center gap-[12px]">
-          <h1 className="font-heading font-semibold text-[32px] lg:text-[36px] text-[#1D3B33] leading-tight">
-            Agent
-          </h1>
-          {detail?.estimated && (
-            <span className="bg-[#DADFDA] text-[#6F7A73] text-[11px] font-semibold px-[8px] py-[2px] rounded-[6px] tracking-wide uppercase">
-              Estimated
-            </span>
-          )}
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-[16px]">
+        <div className="flex flex-col gap-[6px]">
+          <div className="flex items-center gap-[12px]">
+            <h1 className="font-heading font-semibold text-[32px] lg:text-[36px] text-[#1D3B33] leading-tight">
+              Agent
+            </h1>
+            {detail?.estimated && (
+              <span className="bg-[#DADFDA] text-[#6F7A73] text-[11px] font-semibold px-[8px] py-[2px] rounded-[6px] tracking-wide uppercase">
+                Estimated
+              </span>
+            )}
+          </div>
+          <p className="font-ui text-[15px] text-[#6F7A73]">
+            What the agent found, judged and kept each day.
+          </p>
         </div>
-        <p className="font-ui text-[15px] text-[#6F7A73]">
-          What the agent found, judged and kept each day.
-        </p>
+
+        {/* Reddit Scraper Status Chip */}
+        {redditStatus && (
+          <div
+            className={`self-start sm:self-auto flex items-center gap-[8px] px-[12px] py-[7px] rounded-[10px] text-[13px] font-medium border ${
+              redditStatus.status === 'blocked'
+                ? 'bg-[#D4412F]/15 border-[#D4412F]/40 text-[#D4412F]'
+                : redditStatus.status === 'throttled'
+                ? 'bg-[#D99A1E]/15 border-[#D99A1E]/40 text-[#D99A1E]'
+                : 'bg-[#2E7D4F]/10 border-[#2E7D4F]/30 text-[#2E7D4F]'
+            }`}
+          >
+            <span
+              className={`size-[8px] rounded-full shrink-0 ${
+                redditStatus.status === 'blocked'
+                  ? 'bg-[#D4412F]'
+                  : redditStatus.status === 'throttled'
+                  ? 'bg-[#D99A1E]'
+                  : 'bg-[#2E7D4F]'
+              }`}
+            />
+            <span className="font-semibold">Reddit:</span>
+            <span>
+              {redditStatus.status === 'blocked'
+                ? `Blocked (${redditStatus.blocked_until || 'Circuit Breaker'})`
+                : redditStatus.status === 'throttled'
+                ? `Throttled (${redditStatus.requests_today}/${redditStatus.max_requests_per_day} reqs)`
+                : `OK (${redditStatus.requests_today}/${redditStatus.max_requests_per_day} reqs)`}
+            </span>
+          </div>
+        )}
       </div>
 
       {error && (
@@ -257,7 +309,11 @@ export const AgentView: React.FC<AgentViewProps> = ({ onSelectClipForYouTube }) 
                   />
                 </div>
                 <span className="font-ui text-[12px] text-[#6F7A73] truncate">
-                  {d.is_running ? `${d.found} found so far` : `${d.found} found · ${d.approved} kept`}
+                  {d.is_running
+                    ? `${d.found} found so far`
+                    : d.pending_run
+                    ? 'Run scheduled for 7 AM IST'
+                    : `${d.found} found · ${d.approved} kept`}
                 </span>
               </button>
             );
@@ -371,17 +427,13 @@ export const AgentView: React.FC<AgentViewProps> = ({ onSelectClipForYouTube }) 
             <div className="flex items-center justify-between">
               <h3 className="font-heading font-semibold text-[22px] text-[#1D3B33]">
                 {(() => {
-                  const isNextDay = detail?.lineup_target_date && detail.lineup_target_date > selectedDate;
-                  const isToday = days.find(d => d.date === selectedDate)?.is_today;
-                  if (isNextDay) {
-                    return isToday ? "Tomorrow's lineup" : "Next day's lineup";
-                  }
-                  return `Lineup for ${formatDateET(detail?.lineup_target_date || selectedDate, { weekday: 'short', day: 'numeric' })}`;
+                  const targetDate = detail?.lineup_target_date || selectedDate;
+                  return `Batch of ${formatDateIST(targetDate, { day: 'numeric', month: 'short' })} (US day)`;
                 })()}
               </h3>
               {detail?.lineup_target_date && (
                 <span className="font-ui text-[12px] font-semibold text-[#2E7D4F] bg-[#DCEBE0] px-[8px] py-[2px] rounded-[6px]">
-                  For {formatDateET(detail.lineup_target_date, { month: 'short', day: 'numeric' })}
+                  Batch of {formatDateIST(detail.lineup_target_date, { month: 'short', day: 'numeric' })} (US day)
                 </span>
               )}
             </div>
@@ -400,7 +452,15 @@ export const AgentView: React.FC<AgentViewProps> = ({ onSelectClipForYouTube }) 
               ))
             ) : detail?.lineup && detail.lineup.length > 0 ? (
               detail.lineup.map((item, idx) => {
-                const timeDisp = item.time_display || formatTimeET(item.slot_time || `${12 + idx}:00`);
+                const targetDate = detail?.lineup_target_date || selectedDate;
+                const slotValue = item.slot_time || `${12 + idx}:00`;
+                const istTime = formatTimeIST(slotValue, {
+                  referenceDate: targetDate,
+                  omitZeroMinutes: false,
+                  showNextDay: true,
+                  nextDaySuffix: ' (+1 day)',
+                });
+                const etHint = formatTimeETHint(slotValue);
 
                 return (
                   <button
@@ -408,9 +468,16 @@ export const AgentView: React.FC<AgentViewProps> = ({ onSelectClipForYouTube }) 
                     onClick={() => onSelectClipForYouTube?.(item.post_id)}
                     className="flex items-center gap-[16px] py-[10px] px-[8px] hover:bg-[#EDF0EC]/60 rounded-[8px] transition-colors text-left cursor-pointer group"
                   >
-                    <span className="font-heading font-medium text-[15px] text-[#1D3B33] w-[86px] shrink-0">
-                      {timeDisp}
-                    </span>
+                    <div className="flex flex-col w-[125px] shrink-0">
+                      <span className="font-heading font-medium text-[13.5px] text-[#1D3B33] leading-tight">
+                        {istTime}
+                      </span>
+                      {etHint && (
+                        <span className="font-mono text-[11px] text-[#8A958E] leading-tight mt-[1px]">
+                          ({etHint})
+                        </span>
+                      )}
+                    </div>
                     <Thumb src={item.thumb_url} alt={stripHashtags(item.title)} />
                     <div className="flex-1 min-w-0 flex flex-col gap-[2px]">
                       <span className="font-ui font-semibold text-[15px] text-[#1D3B33] truncate group-hover:text-[#2E7D4F] transition-colors">
@@ -420,7 +487,10 @@ export const AgentView: React.FC<AgentViewProps> = ({ onSelectClipForYouTube }) 
                         {item.source_url ? `r/${item.source_url.split('/')[4] || 'funny'}` : 'r/Unexpected'} · u/{item.uploader}
                       </span>
                     </div>
-                    <ScoreChip score={item.hybrid_score} />
+                    <div className="flex items-center gap-[6px] shrink-0">
+                      <ClaimChip status={item.claim_status} size="sm" />
+                      <ScoreChip score={item.hybrid_score} />
+                    </div>
                   </button>
                 );
               })

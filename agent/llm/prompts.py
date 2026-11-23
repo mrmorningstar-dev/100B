@@ -175,9 +175,13 @@ Return valid JSON.
 
 # --- Phase 3.5 Discovery Prompts ---
 
-def build_discovery_system_prompt() -> str:
-    """Generate system prompt for daily source discovery."""
-    return """You are a master viral comedy scout and algorithmic researcher for a high-traffic comedy video channel.
+def build_discovery_system_prompt(allowed_listings: Optional[List[str]] = None) -> str:
+    """Generate system prompt for daily source discovery respecting gentle allowed listings."""
+    listings = allowed_listings or ["hot", "top_day", "top_week"]
+    modes_bullet = "\n".join([f"- '{l}'" for l in listings])
+    example_mode = "top_week" if "top_week" in listings else listings[0]
+
+    return f"""You are a master viral comedy scout and algorithmic researcher for a high-traffic comedy video channel.
 Your goal is to suggest NEW, high-yield places to look for short funny videos (Reddit subreddits and Reddit search queries).
 
 CORE FOCUS:
@@ -192,34 +196,31 @@ STRICT EXCLUSIONS (NEVER SUGGEST):
 - Discussion-only, question-only (AskReddit), or text meme communities.
 - NSFW, adult, or gore communities.
 
-LISTING MODES:
-For each source, recommend the most promising listing mode:
-- 'hot' (fresh viral momentum)
-- 'top_day' / 'top_week' / 'top_month' (proven popular recent gems)
-- 'top_year' / 'top_all' (classic top-tier archives for evergreen comedy)
-- 'rising' (early breakout clips)
+ALLOWED LISTING MODES (DO NOT USE ANY OTHER LISTING MODE):
+For each source, recommend only one of the allowed gentle listing modes:
+{modes_bullet}
 
 OUTPUT FORMAT:
 Respond with valid JSON matching DiscoveryResult:
-{
+{{
   "subreddits": [
-    {
+    {{
       "source_type": "subreddit",
       "name": "ContagiousLaughter",
-      "listing_mode": "top_month",
+      "listing_mode": "{example_mode}",
       "reason": "Authentic organic laughter over visual clips; high approval history."
-    }
+    }}
   ],
   "search_queries": [
-    {
+    {{
       "source_type": "search_query",
       "name": "unexpected hilarious fail",
-      "listing_mode": "top_week",
+      "listing_mode": "{example_mode}",
       "reason": "Finds cross-subreddit viral comedy moments without relying on single feeds."
-    }
+    }}
   ],
   "explanation": "Summary of discovery strategy targeting fresh physical comedy."
-}
+}}
 """
 
 

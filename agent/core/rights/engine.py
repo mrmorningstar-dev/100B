@@ -6,11 +6,11 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional
 from loguru import logger
 
-from core.rights.matcher import BlocklistMatcher
-from core.rights.ocr import VideoOCRChecker
-from core.rights.audio_check import AudioRightsChecker
-from core.rights.visual_match import VisualMatchChecker
-from core.rights.perceptual import compute_video_phashes, HistoryClaimsChecker
+from .matcher import BlocklistMatcher
+from .ocr import VideoOCRChecker
+from .audio_check import AudioRightsChecker
+from .visual_match import VisualMatchChecker
+from .perceptual import compute_video_phashes, HistoryClaimsChecker
 
 
 class RightsCheckEngine:
@@ -35,8 +35,8 @@ class RightsCheckEngine:
         self.matcher = BlocklistMatcher()
         self.ocr_checker = ocr_checker or VideoOCRChecker(matcher=self.matcher)
         self.audio_checker = audio_checker or AudioRightsChecker(
-            daily_cap=rights_cfg.get("providers", {}).get("audd", {}).get("daily_cap", 40),
-            multi_sample_threshold=rights_cfg.get("providers", {}).get("audd", {}).get("multi_sample_threshold", 0.60),
+            daily_cap=rights_cfg.get("providers", {}).get("shazam", {}).get("daily_cap", 40),
+            multi_sample_threshold=rights_cfg.get("providers", {}).get("shazam", {}).get("multi_sample_threshold", 0.60),
         )
 
         is_local_only = rights_cfg.get("local_only", True)
@@ -71,7 +71,7 @@ class RightsCheckEngine:
             self._alerted_providers.add(prov_key)
             msg = f"{provider_name} returned error: {error_detail}. Music-heavy clips routed to review."
             try:
-                from core.rights.alerts import notify_rights_alert
+                from .alerts import notify_rights_alert
                 notify_rights_alert(f"{provider_name} Provider Error", msg)
             except Exception as e:
                 logger.warning(f"Could not dispatch provider error alert: {e}")
@@ -249,7 +249,7 @@ class RightsCheckEngine:
         cur_calls = 0
         if self.db and hasattr(self.db, "get_provider_usage"):
             try:
-                usage = self.db.get_provider_usage(provider="audd")
+                usage = self.db.get_provider_usage(provider="shazam")
                 cur_calls = usage.get("calls", 0)
             except Exception:
                 cur_calls = 0
@@ -264,7 +264,7 @@ class RightsCheckEngine:
         errors_count = audio_res.get("provider_errors", 0)
         if (calls_count > 0 or errors_count > 0) and self.db and hasattr(self.db, "increment_provider_usage"):
             try:
-                self.db.increment_provider_usage("audd", count=calls_count, errors=errors_count)
+                self.db.increment_provider_usage("shazam", count=calls_count, errors=errors_count)
             except Exception as e:
                 logger.warning(f"Failed to increment provider usage: {e}")
 
@@ -275,7 +275,7 @@ class RightsCheckEngine:
         elif audio_res.get("status") == "error":
             reasons.append("provider_error_review")
             risk_score += self.weights.get("unrecognized_music", 35)
-            self._trigger_provider_error_alert("AudD", audio_res.get("error", "AudD API token error"))
+            self._trigger_provider_error_alert("Shazam", audio_res.get("error", "Shazam recognition error"))
         elif audio_res.get("review_music"):
             reasons.append("rights_music_unrecognized")
             risk_score += self.weights.get("unrecognized_music", 35)

@@ -244,9 +244,9 @@ Phase 4 automates uploading the 6 curated daily videos to YouTube as Shorts and 
 
 ### 2. Timezone & Quota Accounting
 
-* **Channel Timezone**: The pipeline's target dates and `--date tomorrow` resolution use **`America/New_York` (US Eastern Time)** as the single source of truth.
+* **Channel Timezone & Display**: The pipeline's target dates and `--date tomorrow` resolution use **`America/New_York` (US Eastern Time)** as the scheduling source of truth for the US audience, while the dashboard displays and accepts times in **IST (`Asia/Kolkata`, UTC+5:30)**.
   * When running daily at 18:00 local time, "tomorrow" corresponds to tomorrow's date in New York.
-  * The 6 daily slots (12:00, 14:00, 17:00, 19:00, 20:00, 21:00 EST) are converted to UTC RFC 3339 for YouTube `publishAt`.
+  * The 6 daily slots (12:00, 14:00, 17:00, 19:00, 20:00, 21:00 ET) are converted to UTC RFC 3339 for YouTube `publishAt`, and are displayed in the dashboard in IST (e.g. 10:30 PM IST, 12:30 AM IST next day).
 * **Daily Quota Budget**:
   * Default project quota: **10,000 units/day** (resets at midnight Pacific Time / PT).
   * `videos.insert` costs **1,600 units** (6 daily slots = 9,600 units).
@@ -420,6 +420,50 @@ To enable live retiming of scheduled clips directly from the dashboard:
 python upload.py auth --manage
 ```
 This authenticates with the `https://www.googleapis.com/auth/youtube` scope and stores the manage token in `uploader/secrets/token_manage.json`. When saving a modified schedule, the dashboard will automatically call `videos.update` to shift `publishAt` for tomorrow's scheduled clips without touching public videos.
+
+---
+
+## 🛡️ Phase 6.1: Content ID Claims Sync & Video Lifecycle
+
+Automated Content ID claim detection and lifecycle management via Gmail read-only notifications, avoiding non-compliant browser scraping.
+
+### 1. Commands
+```bash
+# One-time interactive OAuth setup for Gmail read-only (houseinyourhand@gmail.com)
+python claims_sync.py auth
+
+# Check Gmail connection status, quota, and sync state
+python claims_sync.py status
+
+# Redacted dry-run inspection of real YouTube copyright emails
+python claims_sync.py inspect
+
+# Execute full sync (run manually or scheduled)
+python claims_sync.py sync --dry-run   # Simulation mode (default for 3 days)
+python claims_sync.py sync             # Live execution
+```
+
+### 2. Windows Task Scheduler Setup (Runs Every 30 Minutes)
+To schedule automatic claims sync in Windows PowerShell (Administrator):
+```powershell
+$action = New-ScheduledTaskAction -Execute "python" -Argument "claims_sync.py sync" -WorkingDirectory "C:\Drive-D\python tut\100B"
+$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 30)
+$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -DontStopIfGoingOnBatteries
+Register-ScheduledTask -TaskName "100B_Claims_Sync" -Action $action -Trigger $trigger -Settings $settings
+```
+*Note: `-StartWhenAvailable` ensures the task runs as soon as possible after a missed start (e.g., if the PC was asleep or restarted).*
+
+### 3. Safety Controls & Safeguards
+- **Isolated Credentials**: Dedicated `token_gmail.json` with `gmail.readonly` scope only. Never reused or mixed with YouTube upload tokens.
+- **Dry-Run Gating**: Default `claims.dry_run: true` for the first 3 days. Can be toggled live via the Claims Dashboard.
+- **Reversible Holds**: Claimed scheduled videos are immediately marked private with `publishAt` removed to prevent publication, while deletion is simulated during dry run.
+- **Pipeline Boundary**: Only videos recorded in the `uploads` table are matched. The ~30 older legacy channel videos are strictly ignored and recorded under "Unmatched".
+- **Strike Alert Escalation**: Copyright strikes (`is_strike=True`) trigger urgent Telegram/Windows desktop alerts and **never** auto-delete.
+- **Daily Rate Cap**: Maximum 6 automated actions per day (`max_auto_actions_per_day: 6`).
+- **Live YouTube Probe**: Each sync checks `videos.list` to verify pipeline videos exist. Missing videos are marked `deleted`, freeing their slot for `curate.py --fill-slots <date>`.
+- **Studio Paste Fallback**: Direct text parsing in the Dashboard for manual claims copied out of YouTube Studio.
+
+---
 
 ---
 

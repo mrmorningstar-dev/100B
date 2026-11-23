@@ -2,20 +2,30 @@ import os
 import subprocess
 from pathlib import Path
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from loguru import logger
 
 
-LOG_FILE = Path(__file__).resolve().parent.parent.parent / "logs" / "rights_alerts.log"
+def get_rights_alerts_log_path() -> Path:
+    env_path = os.getenv("RIGHTS_ALERTS_LOG_PATH")
+    if env_path:
+        return Path(env_path)
+    return Path(__file__).resolve().parent.parent.parent / "logs" / "rights_alerts.log"
+
+
+LOG_FILE = get_rights_alerts_log_path()
 
 
 def log_alert(message: str) -> None:
     """Append rights alert message to agent/logs/rights_alerts.log."""
-    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now().isoformat()
+    log_file = get_rights_alerts_log_path()
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    ist_now = datetime.now(ZoneInfo("Asia/Kolkata"))
+    timestamp = ist_now.strftime("%Y-%m-%dT%H:%M:%S IST")
     log_entry = f"[{timestamp}] {message}\n"
-    with open(LOG_FILE, "a", encoding="utf-8") as f:
+    with open(log_file, "a", encoding="utf-8") as f:
         f.write(log_entry)
-    logger.info(f"Rights Alert: {message}")
+    logger.info(f"Rights Alert: [{timestamp}] {message}")
 
 
 def send_windows_notification(title: str, message: str) -> bool:
@@ -23,6 +33,8 @@ def send_windows_notification(title: str, message: str) -> bool:
     Trigger Windows desktop toast notification via PowerShell WinRT API.
     Fails gracefully if running headless or unsupported.
     """
+    if os.getenv("PYTEST_RUNNING") == "1":
+        return True
     safe_title = title.replace('"', '\\"').replace("'", "’")
     safe_msg = message.replace('"', '\\"').replace("'", "’")
 

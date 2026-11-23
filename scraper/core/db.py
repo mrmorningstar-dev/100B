@@ -59,6 +59,37 @@ class VideoDatabase:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_status ON videos(status);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_scraped_at ON videos(scraped_at);")
 
+            # Phase 1 & 2: Circuit breaker, request logs, and subreddit rotation tables
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS reddit_breaker (
+                    layer TEXT PRIMARY KEY,
+                    blocked_until TEXT,
+                    consecutive_failures INTEGER DEFAULT 0,
+                    last_status TEXT,
+                    updated_at TEXT
+                );
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS request_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    day TEXT NOT NULL,
+                    host TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    status_code INTEGER,
+                    created_at TEXT NOT NULL
+                );
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_req_log_day_host ON request_log(day, host);")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS subreddit_history (
+                    name TEXT PRIMARY KEY,
+                    last_scraped_at TEXT,
+                    scraped_count INTEGER DEFAULT 0,
+                    yield_rate REAL DEFAULT 0.0,
+                    approved_count INTEGER DEFAULT 0
+                );
+            """)
+
     def is_id_seen(self, post_id: str) -> bool:
         """Check if post_id exists in database."""
         with self._get_connection() as conn:
@@ -250,3 +281,110 @@ class VideoDatabase:
                 SELECT status, COUNT(*) as count FROM videos GROUP BY status;
             """)
             return {row["status"]: row["count"] for row in cur.fetchall()}
+
+    # --- Circuit Breaker & Request Budgeting ---
+
+    def get_requests_count_today(self, day_str: str, host: str = "reddit") -> int:
+        """Count total HTTP requests logged for a host on a given calendar day."""
+        with self._get_connection() as conn:
+            cur = conn.execute(
+                "SELECT COUNT(*) FROM request_log WHERE day = ? AND host = ?;",
+                (day_str, host),
+            )
+            row = cur.fetchone()
+            return int(row[0]) if row else 0
+
+    def log_request(self, day_str: str, host: str, kind: str, status_code: Optional[int] = None) -> None:
+        """Record an outbound HTTP request for budget enforcement."""
+        now = datetime.now().isoformat()
+        with self._get_connection() as conn:
+            conn.execute(
+                "INSERT INTO request_log (day, host, kind, status_code, created_at) VALUES (?, ?, ?, ?, ?);",
+                (day_str, host, kind, status_code, now),
+            )
+
+    def get_breaker(self, layer: str) -> Optional[Dict[str, Any]]:
+        """Retrieve circuit breaker status for a specific layer."""
+        with self._get_connection() as conn:
+            cur = conn.execute(
+                "SELECT * FROM reddit_breaker WHERE layer = ?;",
+                (layer,),
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+    def get_all_breakers(self) -> Dict[str, Dict[str, Any]]:
+        """Retrieve circuit breaker status for all layers."""
+        with self._get_connection() as conn:
+            cur = conn.execute("SELECT * FROM reddit_breaker;")
+            return {row["layer"]: dict(row) for row in cur.fetchall()}
+
+    def update_breaker(
+        self,
+        layer: str,
+        blocked_until: Optional[str],
+        consecutive_failures: int,
+        last_status: str,
+    ) -> None:
+        """Update or insert circuit breaker state for a layer."""
+        now = datetime.now().isoformat()
+        with self._get_connection() as conn:
+            conn.execute("""
+                INSERT INTO reddit_breaker (layer, blocked_until, consecutive_failures, last_status, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(layer) DO UPDATE SET
+                    blocked_until = excluded.blocked_until,
+                    consecutive_failures = excluded.consecutive_failures,
+                    last_status = excluded.last_status,
+                    updated_at = excluded.updated_at;
+            """, (layer, blocked_until, consecutive_failures, last_status, now))
+
+    def reset_breaker(self, layer: str) -> None:
+        """Reset circuit breaker for a layer on successful request."""
+        now = datetime.now().isoformat()
+        with self._get_connection() as conn:
+            conn.execute("""
+                INSERT INTO reddit_breaker (layer, blocked_until, consecutive_failures, last_status, updated_at)
+                VALUES (?, NULL, 0, 'ok', ?)
+                ON CONFLICT(layer) DO UPDATE SET
+                    blocked_until = NULL,
+                    consecutive_failures = 0,
+                    last_status = 'ok',
+                    updated_at = excluded.updated_at;
+            """, (layer, now))
+
+    # --- Subreddit Rotation & Yield Tracking ---
+
+    def get_subreddit_history(self) -> Dict[str, Dict[str, Any]]:
+        """Retrieve rotation and scrape history for all subreddits."""
+        with self._get_connection() as conn:
+            cur = conn.execute("SELECT * FROM subreddit_history;")
+            return {row["name"]: dict(row) for row in cur.fetchall()}
+
+    def update_subreddit_scraped(
+        self,
+        name: str,
+        scraped_at: str,
+        yield_rate: Optional[float] = None,
+        approved_count: Optional[int] = None,
+    ) -> None:
+        """Record timestamp and metrics when a subreddit is scraped."""
+        with self._get_connection() as conn:
+            cur = conn.execute("SELECT * FROM subreddit_history WHERE name = ?;", (name,))
+            row = cur.fetchone()
+            if row:
+                count = row["scraped_count"] + 1
+                yr = yield_rate if yield_rate is not None else row["yield_rate"]
+                ac = approved_count if approved_count is not None else row["approved_count"]
+                conn.execute("""
+                    UPDATE subreddit_history
+                    SET last_scraped_at = ?, scraped_count = ?, yield_rate = ?, approved_count = ?
+                    WHERE name = ?;
+                """, (scraped_at, count, yr, ac, name))
+            else:
+                yr = yield_rate or 0.0
+                ac = approved_count or 0
+                conn.execute("""
+                    INSERT INTO subreddit_history (name, last_scraped_at, scraped_count, yield_rate, approved_count)
+                    VALUES (?, ?, 1, ?, ?);
+                """, (name, scraped_at, yr, ac))

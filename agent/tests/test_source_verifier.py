@@ -53,7 +53,7 @@ class TestSourceVerifier(unittest.TestCase):
 
     @patch("core.source_verifier.verify_subreddit_online")
     def test_online_verification_drops_nsfw_or_no_video(self, mock_online):
-        mock_online.side_effect = lambda name: {
+        mock_online.side_effect = lambda name, **kwargs: {
             "good_sub": (True, "ok"),
             "nsfw_sub": (False, "over18_or_nsfw"),
             "text_sub": (False, "videos_not_allowed"),
@@ -148,6 +148,58 @@ class TestSourceVerifier(unittest.TestCase):
         self.assertEqual(len(verified), 3)
         # Sleep must be called between consecutive checks (2 times for 3 subreddits)
         self.assertGreaterEqual(mock_sleep.call_count, 2)
+
+    def test_verify_subreddit_online_skips_when_circuit_breaker_open(self):
+        """When circuit breaker is open, verify_subreddit_online skips without making request."""
+        mock_gateway = MagicMock()
+        mock_gateway.check_circuit_breaker.side_effect = lambda layer: (True, "about blocked until 11:07 AM IST") if layer == "about" else (False, None)
+
+        is_valid, reason = verify_subreddit_online("StartledCats", gateway=mock_gateway)
+        self.assertFalse(is_valid)
+        self.assertIn("circuit_breaker_open", reason)
+        mock_gateway.request.assert_not_called()
+
+    def test_verify_subreddit_online_skips_when_json_breaker_open(self):
+        """When JSON breaker is open, about.json check skips without making request."""
+        mock_gateway = MagicMock()
+        mock_gateway.check_circuit_breaker.side_effect = lambda layer: (True, "json blocked until 11:07 AM IST") if layer == "json" else (False, None)
+
+        is_valid, reason = verify_subreddit_online("StartledCats", gateway=mock_gateway)
+        self.assertFalse(is_valid)
+        self.assertIn("circuit_breaker_open", reason)
+        mock_gateway.request.assert_not_called()
+
+    def test_verify_subreddit_online_routes_through_gateway(self):
+        """When breaker is closed, verify_subreddit_online calls gateway.request with layer='about'."""
+        import httpx
+        mock_gateway = MagicMock()
+        mock_gateway.check_circuit_breaker.return_value = (False, None)
+        mock_gateway.can_request.return_value = (True, "ok")
+        payload = {
+            "kind": "t5",
+            "data": {
+                "title": "Startled Cats",
+                "over18": False,
+                "subscribers": 120000,
+                "subreddit_type": "public",
+                "allow_videos": True,
+                "public_description": "Cats jumping at cucumbers",
+            }
+        }
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.text = json.dumps(payload)
+        mock_gateway.request.return_value = (mock_resp, "ok")
+
+        is_valid, reason = verify_subreddit_online("StartledCats", gateway=mock_gateway)
+        self.assertTrue(is_valid)
+        self.assertEqual(reason, "ok")
+        mock_gateway.request.assert_called_once_with(
+            "https://www.reddit.com/r/StartledCats/about.json",
+            layer="about",
+            use_cache=True,
+            ttl_seconds=86400,
+        )
 
 
 if __name__ == "__main__":

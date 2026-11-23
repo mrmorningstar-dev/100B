@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional
 from loguru import logger
 
-from core.rights.matcher import BlocklistMatcher
+from .matcher import BlocklistMatcher
 
 
 class VisualMatchChecker:

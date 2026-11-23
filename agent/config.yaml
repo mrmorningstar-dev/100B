@@ -4,12 +4,23 @@
 
 timezone: "America/New_York"  # US Eastern Time (primary audience timezone for English comedy YouTube Shorts)
 
+# Daily automation schedule (Windows Scheduled Task runs in Asia/Kolkata)
+daily_run:
+  task_name: "100B Daily Video Bot"
+  time_ist: "07:00"
+
 # Execution goals & loop controls
 target_count: 6           # Daily scheduled videos (YouTube upload quota: 6 videos per day)
 spare_buffer: 2           # Extra buffer to ensure 6 ready videos
 max_loops: 3              # Maximum re-planning loops if short on candidates
 recursion_limit: 100      # LangGraph recursion limit for multi-loop execution
 parallel_edits: 2         # Concurrency limit for video editing to protect CPU/GPU
+
+# Reserve pool controls (stocks surplus clips so blocked days have ready backup videos)
+reserve_pool:
+  min_stock: 6               # Minimum reserve clips to maintain
+  target_stock: 12           # Desired reserve stock depth (1-2 days buffer)
+  stock_buffer_per_run: 2    # Extra clips to curate per normal run when reserve is below target
 
 # Cost & LLM safety controls
 cost_limits:
@@ -116,8 +127,22 @@ peak_hours:
   - 21
 
 # Allowed sources and exploration targets (Reddit is primary; Twitter is experimental)
+reddit:
+  enabled: true
+  max_requests_per_run: 30
+  max_requests_per_day: 80
+  subreddits_per_run: 4
+  listings:
+    - "hot"
+    - "top_day"
+    - "top_week"
+
 allowed_sources:
   twitter_enabled: false                # Explicitly disabled; Reddit is primary
+  listings:
+    - "hot"
+    - "top_day"
+    - "top_week"
   subreddits:
     - "funny"
     - "Unexpected"
@@ -153,9 +178,9 @@ rights:
 
   # Provider limits & daily caps
   providers:
-    audd:
+    shazam:
       enabled: true
-      daily_cap: 40                    # Max 40 calls / day
+      daily_cap: 100                   # Free, but be polite: max 100 calls / day (Shazam allows ~20/min)
       multi_sample_threshold: 0.60     # Send 2nd sample only if unrecognized and music_fraction >= 0.60
     google_vision:
       enabled: false                   # Disabled in local-only mode; enable when Cloud project billing is ready

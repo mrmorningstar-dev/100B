@@ -8,9 +8,9 @@ from typing import Dict, Any, Optional, List, Tuple
 from loguru import logger
 
 WORKSPACE_DIR = Path(__file__).resolve().parent.parent.parent.parent
-DB_PATH = WORKSPACE_DIR / "agent" / "data" / "agent.db"
-TOKEN_MANAGE_PATH = WORKSPACE_DIR / "agent" / "data" / "token_manage.json"
-TOKEN_PATH = WORKSPACE_DIR / "agent" / "data" / "token.json"
+DB_PATH = Path(os.environ.get("AGENT_DB_PATH", WORKSPACE_DIR / "agent" / "data" / "agent.db"))
+TOKEN_MANAGE_PATH = WORKSPACE_DIR / "uploader" / "secrets" / "token_manage.json"
+TOKEN_PATH = WORKSPACE_DIR / "uploader" / "secrets" / "token.json"
 
 
 def get_next_free_slot(conn: sqlite3.Connection, current_dt_ny: datetime) -> Tuple[str, str]:
@@ -254,13 +254,17 @@ class YouTubeRightsGate:
                 """, (reserve_post_id, target_date, claimed_post_id))
 
             # 4. Handle claimed video on YouTube (hold or delete)
+            yt_action_success = True
+            yt_action_error = None
             if youtube_service and claimed_video_id:
                 if action_on_claimed == "delete" and delete_confirmation == "DELETE":
                     try:
                         youtube_service.videos().delete(id=claimed_video_id).execute()
                         logger.info(f"Deleted claimed video {claimed_video_id} on YouTube.")
                     except Exception as e:
-                        logger.warning(f"Failed to delete claimed video on YouTube: {e}")
+                        yt_action_success = False
+                        yt_action_error = str(e)
+                        logger.error(f"Failed to delete claimed video on YouTube: {e}")
                 else:
                     try:
                         youtube_service.videos().update(
@@ -269,10 +273,14 @@ class YouTubeRightsGate:
                         ).execute()
                         logger.info(f"Held claimed video {claimed_video_id} private on YouTube.")
                     except Exception as e:
+                        yt_action_success = False
+                        yt_action_error = str(e)
                         logger.warning(f"Failed to hold claimed video on YouTube: {e}")
 
             return {
                 "success": True,
+                "youtube_success": yt_action_success,
+                "youtube_error": yt_action_error,
                 "replaced_post_id": claimed_post_id,
                 "new_post_id": reserve_post_id,
                 "slot_time": slot_time,

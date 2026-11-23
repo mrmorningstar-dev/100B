@@ -471,6 +471,24 @@ class VideoDownloader:
         w = probe["width"]
         h = probe["height"]
 
+        # 2b. Require an audio track. The uploader rejects silent videos ("Video is missing an
+        # audio track"), and Reddit video-only fallbacks produce them. Drop them here so the
+        # pipeline uses a spare candidate instead of failing a slot at upload time.
+        if self.config.get("filters", {}).get("require_audio", True) and not probe.get("has_audio", True):
+            temp_file.unlink(missing_ok=True)
+            shutil.rmtree(dest_folder, ignore_errors=True)
+            self.db.record_seen(
+                post_id=candidate.post_id,
+                source=candidate.source,
+                post_url=candidate.post_url,
+                title=candidate.title,
+                uploader=candidate.uploader,
+                status="filtered",
+                filter_reason="no_audio_track",
+            )
+            logger.info(f"Dropped after download: [{candidate.source}] '{candidate.title[:40]}' - no_audio_track")
+            return False, "Quality check failed: no_audio_track", None
+
         passed_quality, quality_reason = check_media_post_download(dur, w, h, self.config)
         if not passed_quality:
             temp_file.unlink(missing_ok=True)

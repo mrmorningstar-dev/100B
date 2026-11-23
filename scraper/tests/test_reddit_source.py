@@ -520,3 +520,28 @@ class TestRedditSource(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
+
+
+
+class TestRedditSourceProductionStartup(unittest.TestCase):
+    """
+    Regression test: in production (no pytest env vars) RedditSource.__init__ evaluates
+    `"pytest" in sys.modules`. A missing `import sys` crashed every scraper run with NameError,
+    but tests never noticed because PYTEST_CURRENT_TEST short-circuited the check.
+    """
+
+    def test_init_without_pytest_env_vars_does_not_crash(self):
+        import tempfile
+        env_keys = ["PYTEST_CURRENT_TEST", "PYTEST_RUNNING", "TESTING"]
+        saved = {k: os.environ.pop(k) for k in env_keys if k in os.environ}
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                cfg = {
+                    "db_path": os.path.join(tmp, "videos.db"),
+                    "reddit": {"subreddits": ["funny"], "listings": ["hot"], "rate_limit_delay": [0.0, 0.0]},
+                }
+                with patch.object(RedditSource, "_init_praw"):
+                    source = RedditSource(cfg)
+                self.assertEqual(source.listings, ["hot"])
+        finally:
+            os.environ.update(saved)

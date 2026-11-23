@@ -69,6 +69,8 @@ class ScraperTool:
             )
             if res.returncode != 0:
                 logger.warning(f"Scraper process completed with exit code {res.returncode}:\n{res.stderr[-500:]}")
+                if getattr(self, "last_scrape_status", "ok") != "blocked":
+                    self.last_scrape_status = "error"
             else:
                 logger.info("ScraperTool completed successfully.")
             return res.returncode == 0
@@ -126,13 +128,42 @@ class ScraperTool:
                 for line in res.stdout.splitlines():
                     if "dropped before download:" in line:
                         logger.info(line.strip())
+
+            # Read structured scrape telemetry if generated
+            result_path = self.scraper_dir / "data" / "candidates" / f"{date_str}_scrape_result.json"
+            if result_path.is_file():
+                try:
+                    with open(result_path, "r", encoding="utf-8") as f:
+                        self.last_scrape_result = json.load(f)
+                        self.last_scrape_status = self.last_scrape_result.get("status", "ok")
+                except Exception:
+                    self.last_scrape_result = {}
+                    self.last_scrape_status = "ok"
+            else:
+                self.last_scrape_result = {}
+                self.last_scrape_status = "ok"
+
+            # A non-zero exit code that isn't "blocked" is an unhandled failure/crash
+            if res.returncode != 0 and self.last_scrape_status != "blocked":
+                self.last_scrape_status = "error"
+                logger.error(f"Scraper process crashed with code {res.returncode}. Recorded last_scrape_status='error'.")
+
             if candidates_out.is_file():
                 with open(candidates_out, "r", encoding="utf-8") as f:
                     return json.load(f)
             return []
         except Exception as e:
             logger.error(f"Error listing candidates: {e}")
+            self.last_scrape_status = "error"
             return []
+
+    def is_scraper_blocked(self) -> bool:
+        """Check whether the most recent scrape operation reported a circuit breaker block."""
+        return getattr(self, "last_scrape_status", "ok") == "blocked"
+
+    def has_scraper_error(self) -> bool:
+        """Check whether the most recent scrape operation crashed or exited non-zero without being blocked."""
+        return getattr(self, "last_scrape_status", "ok") == "error"
 
     def download_candidates(
         self,
@@ -180,6 +211,8 @@ class ScraperTool:
             )
             if res.returncode != 0:
                 logger.warning(f"Scraper --download-only code {res.returncode}: {res.stderr[-300:]}")
+                if getattr(self, "last_scrape_status", "ok") != "blocked":
+                    self.last_scrape_status = "error"
             if res.stdout:
                 for line in res.stdout.splitlines():
                     if "dropped before download:" in line or "Successfully Downloaded" in line:

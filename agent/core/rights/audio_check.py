@@ -1,9 +1,12 @@
 import os
 import io
+import time
+import asyncio
+import threading
+import concurrent.futures
 import csv
 import av
 import wave
-import requests
 import numpy as np
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
@@ -17,6 +20,12 @@ try:
     _HAS_ONNX = True
 except ImportError:
     _HAS_ONNX = False
+
+try:
+    from shazamio import Shazam
+    _HAS_SHAZAMIO = True
+except ImportError:
+    _HAS_SHAZAMIO = False
 
 
 # Music class indices from AudioSet / YAMNet
@@ -148,65 +157,95 @@ class AudioRecognitionProvider:
         raise NotImplementedError
 
 
-class AudDProvider(AudioRecognitionProvider):
-    """AudD.io commercial audio recognition provider."""
+class ShazamProvider(AudioRecognitionProvider):
+    """
+    Free music recognition via Shazam (unofficial `shazamio` library).
+    No API key and no account needed. Shazam allows roughly 20 requests/minute,
+    so calls are spaced out with a small minimum interval.
+    """
 
-    def __init__(self, api_token: Optional[str] = None):
-        self.api_token = api_token or os.environ.get("AUDD_API_TOKEN") or os.environ.get("AUDD_API_KEY") or ""
+    MIN_INTERVAL_S = 3.5
+    REQUEST_TIMEOUT_S = 15.0
+
+    _lock = threading.Lock()
+    _last_call = 0.0
 
     def is_configured(self) -> bool:
-        return bool(self.api_token and self.api_token.strip())
+        return _HAS_SHAZAMIO
+
+    @staticmethod
+    async def _recognize_async(wav_bytes: bytes) -> Dict[str, Any]:
+        shazam = Shazam()
+        try:
+            return await shazam.recognize(wav_bytes)
+        finally:
+            close = getattr(shazam, "close", None)
+            if close is not None:
+                try:
+                    await close()
+                except Exception:
+                    pass
+
+    @staticmethod
+    def _meta(track: Dict[str, Any], name: str) -> Optional[str]:
+        for section in track.get("sections") or []:
+            for item in section.get("metadata") or []:
+                if (item.get("title") or "").lower() == name.lower():
+                    return item.get("text")
+        return None
 
     def recognize(self, wav_bytes: bytes) -> Dict[str, Any]:
+        res = self._recognize_once(wav_bytes)
+        if res.get("status") == "error":
+            # One retry: Shazam occasionally stalls or drops a request.
+            res = self._recognize_once(wav_bytes)
+        return res
+
+    def _recognize_once(self, wav_bytes: bytes) -> Dict[str, Any]:
         if not self.is_configured():
             return {"status": "unconfigured", "recognized": False}
 
         try:
-            files = {"file": ("audio.wav", wav_bytes, "audio/wav")}
-            data = {"api_token": self.api_token, "return": "apple_music,spotify"}
-            resp = requests.post("https://api.audd.io/", data=data, files=files, timeout=12.0)
+            with self._lock:
+                wait = self.MIN_INTERVAL_S - (time.monotonic() - ShazamProvider._last_call)
+                if wait > 0:
+                    time.sleep(wait)
+                try:
+                    # Run in its own thread + event loop so this also works
+                    # when the caller already has a running event loop.
+                    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                    try:
+                        fut = pool.submit(lambda: asyncio.run(self._recognize_async(wav_bytes)))
+                        out = fut.result(timeout=self.REQUEST_TIMEOUT_S)
+                    finally:
+                        # Do not wait for a stalled request; let it finish in the background.
+                        pool.shutdown(wait=False)
+                finally:
+                    ShazamProvider._last_call = time.monotonic()
 
-            if not resp.ok:
-                return {
-                    "status": "error",
-                    "recognized": False,
-                    "error": f"HTTP {resp.status_code}",
-                }
-
-            res = resp.json()
-            if res.get("status") == "success":
-                result = res.get("result")
-                if result:
-                    return {
-                        "status": "success",
-                        "recognized": True,
-                        "title": result.get("title"),
-                        "artist": result.get("artist"),
-                        "label": result.get("label") or result.get("album"),
-                        "release_date": result.get("release_date"),
-                        "score": 100,
-                    }
+            track = (out or {}).get("track")
+            if not track:
                 return {"status": "success", "recognized": False}
-            else:
-                err_dict = res.get("error") or {}
-                err_msg = err_dict.get("error_message") or res.get("error_message") or "Unknown AudD error"
-                err_code = err_dict.get("error_code")
-                return {
-                    "status": "error",
-                    "recognized": False,
-                    "error": err_msg,
-                    "error_code": err_code,
-                }
+
+            return {
+                "status": "success",
+                "recognized": True,
+                "title": track.get("title"),
+                "artist": track.get("subtitle"),
+                "label": self._meta(track, "Label") or self._meta(track, "Album"),
+                "release_date": self._meta(track, "Released"),
+                "score": 100,
+            }
         except Exception as e:
-            logger.warning(f"AudD API request failed: {e}")
-            return {"status": "error", "recognized": False, "error": str(e), "error_code": None}
+            logger.warning(f"Shazam recognition failed: {e}")
+            return {"status": "error", "recognized": False, "error": str(e) or type(e).__name__, "error_code": None}
 
 
 class AudioRightsChecker:
     """
     Layer 2 Orchestrator:
       - 2A: Local YAMNet music detection
-      - 2B: Commercial track fingerprinting with AudD (1 sample first, 2nd only if music-heavy)
+      - 2B: Track fingerprinting with Shazam (free) (1 sample first, 2nd only if music-heavy)
     """
 
     def __init__(
@@ -217,7 +256,7 @@ class AudioRightsChecker:
         multi_sample_threshold: float = 0.60,
     ):
         self.detector = local_detector or LocalMusicDetector()
-        self.provider = provider or AudDProvider()
+        self.provider = provider or ShazamProvider()
         self.daily_cap = daily_cap
         self.multi_sample_threshold = multi_sample_threshold
 
@@ -267,7 +306,7 @@ class AudioRightsChecker:
         """
         safe_calls = current_daily_calls if isinstance(current_daily_calls, (int, float)) else 0
         if safe_calls >= self.daily_cap:
-            logger.warning("AudD daily call cap reached. Skipping provider fingerprinting.")
+            logger.warning("Fingerprint daily call cap reached. Skipping provider fingerprinting.")
             return {
                 "music_seconds": 0.0,
                 "music_fraction": 0.0,
@@ -327,7 +366,7 @@ class AudioRightsChecker:
                     break
 
             if safe_calls + calls_made >= self.daily_cap:
-                logger.warning("AudD daily call cap reached. Skipping further fingerprinting.")
+                logger.warning("Fingerprint daily call cap reached. Skipping further fingerprinting.")
                 break
 
             wav_bytes = audio_to_wav_bytes(sample_arr)
@@ -342,9 +381,9 @@ class AudioRightsChecker:
 
             if track_info.get("status") == "error":
                 provider_errors += 1
-                last_error_msg = track_info.get("error", "AudD API error")
+                last_error_msg = track_info.get("error", "Fingerprint provider error")
                 last_error_code = track_info.get("error_code")
-                logger.warning(f"AudD recognition error: {last_error_msg} (code: {last_error_code})")
+                logger.warning(f"Fingerprint recognition error: {last_error_msg} (code: {last_error_code})")
                 # Do not call second sample if first errored
                 break
 

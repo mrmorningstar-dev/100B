@@ -73,7 +73,18 @@ class HttpClient:
         env_proxy = os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
         return env_proxy if env_proxy else None
 
-    def _get_headers(self, custom_headers: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    def _get_headers(self, custom_headers: Optional[Dict[str, str]] = None, url: str = "") -> Dict[str, str]:
+        # For Reddit requests, strictly use honest User-Agent and never browser headers
+        if "reddit.com" in url:
+            from core.reddit_gateway import get_reddit_user_agent
+            headers = {
+                "User-Agent": get_reddit_user_agent(),
+                "Accept": "application/json" if ".json" in url else "application/xml, text/xml, */*",
+            }
+            if custom_headers:
+                headers.update(custom_headers)
+            return headers
+
         headers = {
             "User-Agent": get_random_user_agent(),
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
@@ -95,7 +106,7 @@ class HttpClient:
         timeout: Optional[float] = None,
     ) -> Optional[httpx.Response]:
         """Send a GET request with automatic retry and backoff."""
-        req_headers = self._get_headers(headers)
+        req_headers = self._get_headers(headers, url=url)
         req_timeout = timeout or self.timeout
         proxy = self.get_proxy()
 

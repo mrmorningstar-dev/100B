@@ -157,7 +157,8 @@ def test_kill_switch_stop_file(mock_exists, mock_youtube, mock_db, sample_config
     assert not mock_youtube.videos().insert.called
 
 
-def test_max_uploads_per_day_enforced(mock_youtube, mock_db, sample_config):
+@patch("uploader.youtube_client.send_telegram_alert")
+def test_max_uploads_per_day_enforced(mock_alert, mock_youtube, mock_db, sample_config):
     """Enforces max_uploads_per_day limit based on the Pacific-time day."""
     sample_config["upload"]["max_uploads_per_day"] = 2
     uploader = YouTubeUploader(mock_youtube, config=sample_config, db=mock_db)
@@ -194,6 +195,8 @@ def test_max_uploads_per_day_enforced(mock_youtube, mock_db, sample_config):
     assert status == "pending"
     assert "Daily upload limit reached for Pacific day" in err
     assert not mock_youtube.videos().insert.called
+    assert mock_alert.called
+    assert mock_alert.call_args[0][0] == "DAILY_UPLOAD_LIMIT_REACHED"
 
 
 def test_cmd_upload_limit_flag(tmp_path):

@@ -126,10 +126,45 @@ def build_curation_graph(
         target_count = state.get("target_count", 6)
         cfg_buffer = state.get("spare_buffer", 2)
         buffer = min(cfg_buffer, target_count // 2) if target_count >= 2 else 0
-        goal = target_count + buffer
+
+        # Reserve deficit buffer
+        reserve_cfg = config.get("reserve_pool", {})
+        target_stock = int(reserve_cfg.get("target_stock", 12))
+        stock_buffer = int(reserve_cfg.get("stock_buffer_per_run", 2))
+        reserve_deficit = 0
+        if db and hasattr(db, "fetch_reserve_pool_candidates"):
+            try:
+                res_count = len(db.fetch_reserve_pool_candidates(limit=50))
+                if res_count < target_stock:
+                    reserve_deficit = min(target_stock - res_count, stock_buffer)
+            except Exception:
+                pass
+
+        goal = target_count + buffer + reserve_deficit
 
         total_acquired = len(state.get("approved", [])) + len(state.get("borderline", []))
         logger.info(f"Count check after rights: {total_acquired}/{goal} clips (Loop {loop_count}/{max_loops})")
+
+        # Circuit breaker safety: if scraper is blocked, do not re-plan extra loops
+        if state.get("scraper_blocked"):
+            logger.warning("Scraper is blocked by circuit breaker. Bypassing replan loops.")
+            if len(state.get("borderline", [])) > 0:
+                return "human_review"
+            return "backfill"
+
+        # Crash safety: if scraper process crashed, do not re-plan extra loops
+        if state.get("scraper_error"):
+            logger.error("Scraper process crashed (non-zero exit). Bypassing replan loops.")
+            if len(state.get("borderline", [])) > 0:
+                return "human_review"
+            return "backfill"
+
+        # Budget safety: if Reddit request budget is exhausted, do not re-plan extra loops
+        if state.get("budget_exhausted"):
+            logger.warning("Reddit request budget is exhausted. Bypassing replan loops.")
+            if len(state.get("borderline", [])) > 0:
+                return "human_review"
+            return "backfill"
 
         # Loop back to PLAN if still under goal and under max_loops (never discover!)
         if total_acquired < goal and loop_count < max_loops and not state.get("backfill_performed", False):
@@ -157,6 +192,10 @@ def build_curation_graph(
     # 5. Conditional Routing after 'backfill'
     def route_after_backfill(state: CurationState) -> Literal["plan", "update_registry"]:
         if state.get("human_interrupted", False):
+            return "update_registry"
+
+        if state.get("scraper_blocked") or state.get("scraper_error") or state.get("budget_exhausted"):
+            logger.warning("Scraper is blocked, crashed, or budget exhausted. Suppressing extra loop from backfill.")
             return "update_registry"
 
         if state.get("trigger_extra_loop", False):

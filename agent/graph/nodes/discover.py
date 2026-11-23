@@ -35,15 +35,28 @@ def discover_node(
     logger.info("--- [Node: DISCOVER] Running Daily LLM Discovery ---")
     target_date = state.get("target_date", "")
 
+    # Shared RedditGateway for budget and circuit breaker checks
+    try:
+        from scraper.core.reddit_gateway import RedditGateway
+        gateway = RedditGateway()
+    except Exception:
+        gateway = None
+
     # 1. Fresh Context Collection (deterministic plain code)
-    fresh_context = collect_fresh_context(db, config)
+    fresh_context = collect_fresh_context(db, config, gateway=gateway)
     fresh_titles = fresh_context.get("fresh_titles", [])
     active_sources = fresh_context.get("active_sources", [])
     top_reject_reasons = fresh_context.get("top_reject_reasons", [])
     already_tried = fresh_context.get("already_tried_names", [])
 
     # 2. Discovery LLM Call
-    sys_prompt = build_discovery_system_prompt()
+    reddit_cfg = config.get("reddit", {})
+    allowed_listings: List[str] = (
+        reddit_cfg.get("listings")
+        or config.get("allowed_sources", {}).get("listings")
+        or ["hot", "top_day", "top_week"]
+    )
+    sys_prompt = build_discovery_system_prompt(allowed_listings=allowed_listings)
     usr_prompt = build_discovery_user_prompt(
         fresh_titles=fresh_titles,
         active_sources=active_sources,
@@ -61,17 +74,19 @@ def discover_node(
         )
 
         for sub in res.subreddits:
+            sub_mode = sub.listing_mode if sub.listing_mode in allowed_listings else allowed_listings[0]
             suggested_candidates.append({
                 "source_type": "subreddit",
                 "name": sub.name,
-                "listing_mode": sub.listing_mode,
+                "listing_mode": sub_mode,
                 "reason": sub.reason,
             })
         for q in res.search_queries:
+            q_mode = q.listing_mode if q.listing_mode in allowed_listings else allowed_listings[0]
             suggested_candidates.append({
                 "source_type": "search_query",
                 "name": q.name,
-                "listing_mode": q.listing_mode,
+                "listing_mode": q_mode,
                 "reason": q.reason,
             })
 
@@ -89,6 +104,7 @@ def discover_node(
         db=db,
         max_daily_trials=5,
         skip_online_check=state.get("dry_run", False),
+        gateway=gateway,
     )
 
     # 4. Add verified trial sources to registry

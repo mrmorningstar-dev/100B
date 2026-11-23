@@ -32,6 +32,8 @@ class CurationState(TypedDict, total=False):
     dry_run: bool                       # True if running in dry-run mode
     no_review: bool                     # True to bypass interactive human review (unattended mode)
     borderline_policy: str              # Policy for borderline clips in unattended mode ('reject' or 'approve_top')
+    scraper_blocked: bool               # True if circuit breaker halted scraping
+    scraper_error: bool                 # True if scraper process crashed (non-zero exit that isn't blocked)
 
     # Phase 3.5 Discovery & Two-step pipeline fields
     discovered: bool                    # True if daily discovery LLM node has run

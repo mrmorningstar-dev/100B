@@ -1,15 +1,15 @@
-from core.rights.matcher import BlocklistMatcher, normalize_text, levenshtein_distance
-from core.rights.ocr import VideoOCRChecker
-from core.rights.audio_check import (
+from .matcher import BlocklistMatcher, normalize_text, levenshtein_distance
+from .ocr import VideoOCRChecker
+from .audio_check import (
     AudioRightsChecker,
     LocalMusicDetector,
-    AudDProvider,
+    ShazamProvider,
     AudioRecognitionProvider,
 )
-from core.rights.visual_match import VisualMatchChecker
-from core.rights.perceptual import HistoryClaimsChecker, compute_video_phashes
-from core.rights.engine import RightsCheckEngine
-from core.rights.alerts import notify_rights_alert, log_alert, send_windows_notification
+from .visual_match import VisualMatchChecker
+from .perceptual import HistoryClaimsChecker, compute_video_phashes
+from .engine import RightsCheckEngine
+from .alerts import notify_rights_alert, log_alert, send_windows_notification
 
 __all__ = [
     "BlocklistMatcher",
@@ -18,7 +18,7 @@ __all__ = [
     "VideoOCRChecker",
     "AudioRightsChecker",
     "LocalMusicDetector",
-    "AudDProvider",
+    "ShazamProvider",
     "AudioRecognitionProvider",
     "VisualMatchChecker",
     "HistoryClaimsChecker",

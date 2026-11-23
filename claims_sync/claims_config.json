@@ -1,0 +1,8 @@
+{
+  "auto_action_scheduled": "delete",
+  "auto_action_public": "delete",
+  "dry_run": true,
+  "max_auto_actions_per_day": 6,
+  "grace_hours": 0,
+  "keep_if_views_over": null
+}

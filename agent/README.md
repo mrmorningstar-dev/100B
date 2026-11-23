@@ -56,8 +56,10 @@ flowchart TD
 5. **Reserve Pool & Surplus Preservation**:
    - If approved clips fall short of 24, automatically backfills from leftover approved clips from earlier days (`reserve_pool` table).
    - Any surplus approved clips beyond 24 are saved into the reserve pool for future days.
-6. **Peak-Hour Optimization**:
-   - High-engagement peak hours (e.g., 12 PM–2 PM, 6 PM–9 PM) in your configured timezone automatically receive the highest-scoring viral clips.
+6. **Peak-Hour Optimization & Timezone Design**:
+   - Scheduling is in ET (US audience). The dashboard displays IST.
+   - High-engagement peak hours (12 PM, 2 PM, 5 PM, 7 PM, 8 PM, 9 PM ET) in `agent/config.yaml` (`timezone: "America/New_York"`) automatically receive the highest-scoring viral clips for US viewership.
+   - The web dashboard presents all times in `Asia/Kolkata` (IST) with secondary US ET hints (e.g. `10:30 PM IST (12 PM ET)`), converting accurately across US Daylight Saving Time (EDT vs EST).
    - Sources are interleaved so identical subreddits are never posted back-to-back.
 
 ---

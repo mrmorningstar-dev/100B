@@ -19,6 +19,9 @@ def get_ro_connection():
 def get_rw_connection():
     return backend_db.get_rw_connection()
 
+_root_dir = str(WORKSPACE_DIR)
+if _root_dir not in sys.path:
+    sys.path.insert(0, _root_dir)
 _agent_dir = str(WORKSPACE_DIR / "agent")
 if _agent_dir not in sys.path:
     sys.path.insert(0, _agent_dir)
@@ -29,6 +32,11 @@ try:
 except ImportError:
     from agent.core.rights.youtube_gate import YouTubeRightsGate
     from agent.core.rights.perceptual import HistoryClaimsChecker
+
+from claims_sync.config import load_claims_config, set_dry_run
+from claims_sync.parser import parse_studio_paste
+from claims_sync.actions import undo_auto_hold, count_today_auto_actions
+from claims_sync.auth import is_gmail_authenticated
 
 router = APIRouter(prefix="/api/rights", tags=["rights"])
 CONFIG_PATH = WORKSPACE_DIR / "agent" / "config.yaml"
@@ -101,13 +109,41 @@ class ReplaceFromReserveRequest(BaseModel):
 class PublishedActionRequest(BaseModel):
     post_id: str
     video_id: Optional[str] = None
-    action: str  # keep, make_private, delete
+    action: str  # keep, make_private, delete, remove_record
     delete_confirmation: Optional[str] = None
 
 
 class AddBlocklistRequest(BaseModel):
     type: str  # text, domain, uploader, subreddit, claimant, track
     value: str
+
+
+class ToggleDryRunRequest(BaseModel):
+    dry_run: bool
+
+
+class ParseStudioPasteRequest(BaseModel):
+    text: str
+
+
+class SaveManualClaimRequest(BaseModel):
+    post_id: str
+    video_id: Optional[str] = None
+    asset_title: Optional[str] = None
+    track_artist: Optional[str] = None
+    claimant: Optional[str] = None
+    claim_type: str = "audio"
+    affects_reach: bool = False
+    notes: Optional[str] = None
+
+
+class MarkClaimReleasedRequest(BaseModel):
+    claim_id: Optional[int] = None
+    post_id: Optional[str] = None
+
+
+class UndoAutoHoldRequest(BaseModel):
+    post_id: str
 
 
 @router.get("/status")
@@ -118,7 +154,7 @@ def get_rights_status():
     """
     cfg = load_rights_config()
     is_local_only = cfg.get("local_only", True)
-    audd_cap = cfg.get("providers", {}).get("audd", {}).get("daily_cap", 40)
+    shazam_cap = cfg.get("providers", {}).get("shazam", {}).get("daily_cap", 100)
     vision_cap = cfg.get("providers", {}).get("google_vision", {}).get("daily_cap", 25)
 
     today_str = datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
@@ -153,21 +189,22 @@ def get_rights_status():
         """)
         sub_rates = {r["source_name"]: r["cnt"] for r in cur_sub.fetchall()}
 
-    has_audd_key = bool(os.environ.get("AUDD_API_TOKEN") or os.environ.get("AUDD_API_KEY"))
+    import importlib.util
+    shazam_ready = importlib.util.find_spec("shazamio") is not None  # free, no API key needed
     has_vision_key = bool(os.environ.get("GOOGLE_VISION_API_KEY"))
 
-    audd_calls = usage_rows.get("audd", {}).get("calls", 0)
-    audd_errors = usage_rows.get("audd", {}).get("errors", 0)
+    shazam_calls = usage_rows.get("shazam", {}).get("calls", 0)
+    shazam_errors = usage_rows.get("shazam", {}).get("errors", 0)
     vision_calls = usage_rows.get("google_vision", {}).get("calls", 0)
     vision_errors = usage_rows.get("google_vision", {}).get("errors", 0)
 
-    token_val = (os.environ.get("AUDD_API_TOKEN") or os.environ.get("AUDD_API_KEY") or "").strip()
-    is_audd_invalid = bool(audd_errors > 0 or (has_audd_key and token_val == "f3ed6e678f1b19d032e2a0c40ed795d9"))
+    # Flag an error only when most of today's requests failed (one network blip is not an outage)
+    is_shazam_failing = bool(shazam_errors > 0 and shazam_errors * 2 >= max(shazam_calls, 1))
 
     active_layers = {
         "layer1_agency_ocr": True,
         "layer2a_local_music": True,
-        "layer2b_fingerprint": has_audd_key and not is_local_only and not is_audd_invalid,
+        "layer2b_fingerprint": shazam_ready and not is_local_only and not is_shazam_failing,
         "layer3_cloud_vision": has_vision_key and not is_local_only,
         "layer4_scheduled_gate": True,
         "layer5_history_learned": True,
@@ -178,13 +215,13 @@ def get_rights_status():
         "unreviewed_policy": cfg.get("unreviewed_policy", "hold"),
         "active_layers": active_layers,
         "providers": {
-            "audd": {
-                "configured": has_audd_key,
-                "calls_today": audd_calls,
-                "errors_today": audd_errors,
-                "daily_cap": audd_cap,
-                "status": "error" if is_audd_invalid else ("active" if has_audd_key and not is_local_only else "idle"),
-                "error_message": "AudD: invalid token" if is_audd_invalid else None,
+            "shazam": {
+                "configured": shazam_ready,
+                "calls_today": shazam_calls,
+                "errors_today": shazam_errors,
+                "daily_cap": shazam_cap,
+                "status": "error" if is_shazam_failing else ("active" if shazam_ready and not is_local_only else "idle"),
+                "error_message": "Shazam: most recent requests failed" if is_shazam_failing else None,
             },
             "google_vision": {
                 "configured": has_vision_key,
@@ -294,6 +331,32 @@ def get_needs_review_queue():
 
             r["thumb_url"] = f"/api/youtube/thumb/{pid}"
 
+            # Attach latest claim from claims table
+            claim_row = conn.execute("""
+                SELECT id, state, source, claim_type, claimant, asset_title, track_title, track_artist, affects_reach, detected_at, created_at, notes
+                FROM claims
+                WHERE post_id = ? OR (video_id = ? AND video_id IS NOT NULL AND video_id != '')
+                ORDER BY id DESC LIMIT 1
+            """, (pid, vid)).fetchone()
+
+            if claim_row:
+                r["claim"] = dict(claim_row)
+                c_state = claim_row["state"]
+                if c_state == "active":
+                    r["claim_chip"] = "claimed"
+                elif c_state == "released":
+                    r["claim_chip"] = "released"
+                elif c_state == "unknown_pending_confirmation":
+                    r["claim_chip"] = "pending_confirmation"
+                else:
+                    r["claim_chip"] = "possible"
+            else:
+                r["claim"] = None
+                if r.get("rights_risk", 0) >= 40 or r.get("decision") == "review":
+                    r["claim_chip"] = "possible"
+                else:
+                    r["claim_chip"] = "none"
+
     target_date = filtered_rows[0]["target_date"] if filtered_rows else today_str
     return {"target_date": target_date, "clips": filtered_rows}
 
@@ -320,8 +383,13 @@ def get_recently_published(days: int = 7):
         rows = [dict(r) for r in cur.fetchall()]
 
         # Attach claim info from claims table if present
-        cur_claims = conn.execute("SELECT post_id, action, claimant, claim_type, asset_title FROM claims")
-        claims_map = {c["post_id"]: dict(c) for c in cur_claims.fetchall()}
+        cur_claims = conn.execute("""
+            SELECT post_id, video_id, id, state, source, action, claimant, claim_type, asset_title, track_title, track_artist, affects_reach, detected_at, created_at, notes
+            FROM claims ORDER BY id ASC
+        """)
+        claims_rows = [dict(c) for c in cur_claims.fetchall()]
+        claims_map_by_post = {c["post_id"]: c for c in claims_rows if c.get("post_id")}
+        claims_map_by_vid = {c["video_id"]: c for c in claims_rows if c.get("video_id")}
 
     video_ids = [r["video_id"] for r in rows if r.get("video_id")]
     live_stats = {}
@@ -358,15 +426,27 @@ def get_recently_published(days: int = 7):
             continue
 
         r["thumb_url"] = f"/api/youtube/thumb/{r['post_id']}"
-        claim_info = claims_map.get(r["post_id"])
+        claim_info = claims_map_by_post.get(r["post_id"]) or claims_map_by_vid.get(vid)
         if claim_info:
+            r["claim"] = claim_info
             r["claim_action"] = claim_info.get("action")
             r["claimant"] = claim_info.get("claimant")
             r["claim_type"] = claim_info.get("claim_type")
+            c_state = claim_info.get("state")
+            if c_state == "active":
+                r["claim_chip"] = "claimed"
+            elif c_state == "released":
+                r["claim_chip"] = "released"
+            elif c_state == "unknown_pending_confirmation":
+                r["claim_chip"] = "pending_confirmation"
+            else:
+                r["claim_chip"] = "possible"
         else:
+            r["claim"] = None
             r["claim_action"] = None
             r["claimant"] = None
             r["claim_type"] = None
+            r["claim_chip"] = "none"
 
         if vid and live.get("missing"):
             r["is_missing"] = True
@@ -542,10 +622,10 @@ def replace_claimed_clip_from_reserve(req: ReplaceFromReserveRequest):
 @router.post("/action-published", dependencies=[Depends(verify_rights_write_security)])
 def handle_published_clip_action(req: PublishedActionRequest):
     """
-    Handle action on recently published clip: keep, make_private, delete.
+    Handle action on recently published clip: keep, make_private, delete, remove_record.
     Deleting requires explicit typed confirmation "DELETE".
     """
-    if req.action == "delete":
+    if req.action in ("delete", "remove_record"):
         if req.delete_confirmation != "DELETE":
             raise HTTPException(status_code=400, detail="Must type 'DELETE' to confirm deletion.")
 
@@ -567,13 +647,15 @@ def handle_published_clip_action(req: PublishedActionRequest):
                 except Exception:
                     pass
             conn.execute("UPDATE uploads SET privacy = 'private', rights_status = 'held' WHERE post_id = ?", (req.post_id,))
-        elif req.action == "delete":
+        elif req.action in ("delete", "remove_record"):
             if yt_service and req.video_id:
                 try:
                     yt_service.videos().delete(id=req.video_id).execute()
                 except Exception:
                     pass
-            conn.execute("UPDATE uploads SET status = 'deleted' WHERE post_id = ?", (req.post_id,))
+            # Permanently remove the clip from uploads and schedule tables
+            conn.execute("DELETE FROM uploads WHERE post_id = ?", (req.post_id,))
+            conn.execute("DELETE FROM schedule WHERE post_id = ?", (req.post_id,))
         elif req.action == "keep":
             conn.execute("UPDATE uploads SET rights_status = 'cleared', claim_status = 'none' WHERE post_id = ?", (req.post_id,))
             conn.execute("UPDATE claims SET action = 'kept' WHERE post_id = ?", (req.post_id,))
@@ -583,9 +665,193 @@ def handle_published_clip_action(req: PublishedActionRequest):
 
 @router.get("/claims")
 def get_claims_history(limit: int = 50):
-    """Returns list of registered claims."""
+    """Returns list of registered claims with lifecycle state and nudge flags."""
+    now = datetime.now()
     with get_ro_connection() as conn:
         cur = conn.execute("SELECT * FROM claims ORDER BY id DESC LIMIT ?", (limit,))
+        rows = [dict(r) for r in cur.fetchall()]
+
+    for r in rows:
+        source = r.get("source") or "manual"
+        detected_at_str = r.get("detected_at") or r.get("created_at")
+        r["verify_in_studio_nudge"] = False
+        if source == "manual" and detected_at_str and r.get("state") == "active":
+            try:
+                dt = datetime.fromisoformat(detected_at_str)
+                if (now - dt).days >= 7:
+                    r["verify_in_studio_nudge"] = True
+            except Exception:
+                pass
+
+        r["confirm_release_prompt"] = (r.get("state") == "unknown_pending_confirmation")
+
+    return rows
+
+
+@router.get("/claims-sync-status")
+def get_claims_sync_status():
+    """Returns status of Gmail connection, sync metrics, dry-run state, and daily action counts."""
+    cfg = load_claims_config()
+    is_auth = is_gmail_authenticated()
+
+    status_file = WORKSPACE_DIR / "agent" / "data" / "claims_sync_status.json"
+    sync_meta = {}
+    if status_file.is_file():
+        try:
+            with open(status_file, "r", encoding="utf-8") as f:
+                sync_meta = json.load(f)
+        except Exception:
+            pass
+
+    with get_ro_connection() as conn:
+        today_actions = count_today_auto_actions(conn)
+        unmatched_cnt = conn.execute("SELECT COUNT(*) as cnt FROM claim_emails WHERE status = 'unmatched'").fetchone()["cnt"]
+        total_processed = conn.execute("SELECT COUNT(*) as cnt FROM claim_emails").fetchone()["cnt"]
+
+    return {
+        "gmail_connected": is_auth,
+        "gmail_error": sync_meta.get("gmail_error") if not is_auth else None,
+        "last_sync_at": sync_meta.get("last_sync_at"),
+        "processed_count": total_processed,
+        "unmatched_count": unmatched_cnt,
+        "dry_run": cfg.get("dry_run", True),
+        "auto_action_scheduled": cfg.get("auto_action_scheduled", "delete"),
+        "auto_action_public": cfg.get("auto_action_public", "delete"),
+        "max_auto_actions_per_day": cfg.get("max_auto_actions_per_day", 6),
+        "today_actions_count": today_actions,
+    }
+
+
+@router.post("/claims-sync/trigger", dependencies=[Depends(verify_rights_write_security)])
+def trigger_claims_sync_now():
+    """Manually trigger claims sync from the dashboard."""
+    from claims_sync.sync import run_claims_sync
+    res = run_claims_sync()
+    return res
+
+
+@router.post("/claims-sync/toggle-dry-run", dependencies=[Depends(verify_rights_write_security)])
+def toggle_dry_run_endpoint(req: ToggleDryRunRequest):
+    """Toggle claims dry-run mode on or off."""
+    cfg = set_dry_run(req.dry_run)
+    return {"success": True, "dry_run": cfg.get("dry_run", True)}
+
+
+@router.post("/parse-studio-paste")
+def parse_studio_paste_endpoint(req: ParseStudioPasteRequest):
+    """Parse raw text copied out of YouTube Studio claim modal."""
+    parsed = parse_studio_paste(req.text)
+    return {"success": True, "parsed": parsed}
+
+
+@router.post("/save-manual-claim", dependencies=[Depends(verify_rights_write_security)])
+def save_manual_claim(req: SaveManualClaimRequest):
+    """Save or update a manual claim entered via YouTube Studio paste."""
+    with get_rw_connection() as conn:
+        existing = conn.execute("""
+            SELECT id FROM claims 
+            WHERE (post_id = ? OR (video_id = ? AND video_id IS NOT NULL AND video_id != ''))
+              AND state IN ('active', 'unknown_pending_confirmation')
+            ORDER BY id ASC LIMIT 1
+        """, (req.post_id, req.video_id)).fetchone()
+
+        if existing:
+            claim_id = existing["id"]
+            conn.execute("""
+                UPDATE claims
+                SET claim_type = COALESCE(?, claim_type),
+                    claimant = COALESCE(NULLIF(?, ''), claimant),
+                    asset_title = COALESCE(NULLIF(?, ''), asset_title),
+                    track_title = COALESCE(NULLIF(?, ''), track_title),
+                    track_artist = COALESCE(NULLIF(?, ''), track_artist),
+                    affects_reach = ?,
+                    notes = COALESCE(NULLIF(?, ''), notes),
+                    last_seen_at = CURRENT_TIMESTAMP,
+                    state = 'active'
+                WHERE id = ?
+            """, (
+                req.claim_type,
+                req.claimant,
+                req.asset_title,
+                req.asset_title,
+                req.track_artist,
+                1 if req.affects_reach else 0,
+                req.notes,
+                claim_id,
+            ))
+        else:
+            cur = conn.execute("""
+                INSERT INTO claims (
+                    video_id, post_id, claim_type, claimant, asset_title,
+                    track_title, track_artist, affects_reach, notes, action, noted_at,
+                    state, source, detected_at, last_seen_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'held', CURRENT_TIMESTAMP, 'active', 'manual', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """, (
+                req.video_id,
+                req.post_id,
+                req.claim_type,
+                req.claimant or "Unknown Claimant",
+                req.asset_title or "Unknown Asset",
+                req.asset_title,
+                req.track_artist,
+                1 if req.affects_reach else 0,
+                req.notes,
+            ))
+            claim_id = cur.lastrowid
+
+        conn.execute("UPDATE uploads SET claim_status = 'claimed' WHERE post_id = ?", (req.post_id,))
+
+    return {"success": True, "claim_id": claim_id}
+
+
+@router.post("/mark-claim-released", dependencies=[Depends(verify_rights_write_security)])
+def mark_claim_released_endpoint(req: MarkClaimReleasedRequest):
+    """Mark a claim as released (either by claim_id or post_id)."""
+    with get_rw_connection() as conn:
+        if req.claim_id:
+            conn.execute("""
+                UPDATE claims
+                SET state = 'released', released_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            """, (req.claim_id,))
+            row = conn.execute("SELECT post_id, video_id FROM claims WHERE id = ?", (req.claim_id,)).fetchone()
+            if row:
+                pid = row["post_id"]
+                vid = row["video_id"]
+                active_cnt = conn.execute("SELECT COUNT(*) as cnt FROM claims WHERE (post_id = ? OR video_id = ?) AND state = 'active'", (pid, vid)).fetchone()["cnt"]
+                if active_cnt == 0:
+                    conn.execute("UPDATE uploads SET claim_status = 'released' WHERE post_id = ?", (pid,))
+        elif req.post_id:
+            conn.execute("""
+                UPDATE claims
+                SET state = 'released', released_at = CURRENT_TIMESTAMP
+                WHERE post_id = ?
+            """, (req.post_id,))
+            conn.execute("UPDATE uploads SET claim_status = 'released' WHERE post_id = ?", (req.post_id,))
+
+    return {"success": True}
+
+
+@router.post("/undo-auto-hold", dependencies=[Depends(verify_rights_write_security)])
+def undo_auto_hold_endpoint(req: UndoAutoHoldRequest):
+    """Undo reversible auto-hold: restore scheduled publishAt and clear claim hold."""
+    res = undo_auto_hold(post_id=req.post_id)
+    return res
+
+
+@router.get("/claim-actions")
+def get_claim_actions(limit: int = 50):
+    """Returns recent audit log rows of claim actions."""
+    with get_ro_connection() as conn:
+        cur = conn.execute("SELECT * FROM claim_actions ORDER BY id DESC LIMIT ?", (limit,))
+        return [dict(r) for r in cur.fetchall()]
+
+
+@router.get("/claim-emails/unmatched")
+def get_unmatched_claim_emails(limit: int = 50):
+    """Returns list of claim emails that could not be matched to pipeline uploads."""
+    with get_ro_connection() as conn:
+        cur = conn.execute("SELECT * FROM claim_emails WHERE status = 'unmatched' ORDER BY received_at DESC LIMIT ?", (limit,))
         return [dict(r) for r in cur.fetchall()]
 
 

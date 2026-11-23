@@ -150,6 +150,10 @@ def parse_args():
         "--twitter-accounts", default=None,
         help="Comma-separated Twitter accounts to override config (e.g. DailyViralVids,LaughsDaily)",
     )
+    parser.add_argument(
+        "--force", action="store_true",
+        help="Bypass circuit breaker and force scrape execution",
+    )
 
     return parser.parse_args()
 
@@ -158,6 +162,7 @@ def main():
     args = parse_args()
     date_str = args.date or datetime.now().strftime("%Y-%m-%d")
     config = load_yaml_config(args.config)
+    config["force"] = bool(args.force)
 
     # Override subreddits / twitter accounts in config if passed via CLI
     if args.subreddits:
@@ -351,6 +356,27 @@ def main():
             logger.error(f"Source [{src.name}] encountered an unhandled error: {e}. Continuing with remaining sources.")
 
     logger.info(f"Total raw candidates found across all sources: {len(all_raw_candidates)}")
+
+    # Save structured scrape result summary
+    reddit_src = next((s for s in active_sources if s.name == "reddit"), None)
+    scrape_meta = getattr(reddit_src, "last_result", {}) if reddit_src else {}
+    if not scrape_meta:
+        scrape_meta = {
+            "status": "success" if all_raw_candidates else "partial",
+            "requests_used": 0,
+            "count_403": 0,
+            "count_429": 0,
+            "blocked_until": None,
+        }
+    summary_path = data_dir / "candidates" / f"{date_str}_scrape_result.json"
+    try:
+        summary_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(summary_path, "w", encoding="utf-8") as f:
+            meta_to_save = {k: v for k, v in scrape_meta.items() if k != "candidates"}
+            meta_to_save["raw_candidates_found"] = len(all_raw_candidates)
+            json.dump(meta_to_save, f, indent=2)
+    except Exception as e:
+        logger.debug(f"Failed to write scrape_result.json: {e}")
 
     # 2. Pre-Download Filtering & ID Deduplication
     valid_candidates = []

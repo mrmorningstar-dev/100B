@@ -1,6 +1,6 @@
 import React from 'react';
 import { Bot, Calendar, PlaySquare, ShieldAlert } from 'lucide-react';
-import { formatTimeET, formatWeekdayET } from '../utils/timeFormat';
+import { formatTimeIST, formatWeekdayIST } from '../utils/timeFormat';
 
 export type NavTab = 'agent' | 'schedule' | 'youtube' | 'claims';
 
@@ -11,8 +11,12 @@ interface PipelineStatusData {
     uploaded?: number;
     scheduled?: number;
     failed?: number;
+    message?: string;
+    next_attempt_at?: string;
   } | null;
   next_run_time?: string;
+  last_task_result?: number | null;
+  last_task_error?: string | null;
 }
 
 interface RailProps {
@@ -29,28 +33,53 @@ export const Rail: React.FC<RailProps> = ({
   const lastRun = pipelineStatus?.last_run;
   const isLastRunPassed = lastRun?.status === 'success';
   const isLastRunPartial = lastRun?.status === 'partial';
+  const isLastRunWaiting = lastRun?.status === 'waiting';
 
-  // Format last run time (Channel ET)
-  let lastRunTimeStr = 'Sat 6:02 PM ET · 6 of 6 uploaded';
+  let statusLabel = 'Last run failed';
+  if (isLastRunPassed) statusLabel = 'Last run passed';
+  else if (isLastRunPartial) statusLabel = 'Last run partial';
+  else if (isLastRunWaiting) statusLabel = 'Waiting to retry';
+
+  const dotColor = isLastRunPassed
+    ? 'bg-[#2E7D4F]'
+    : isLastRunWaiting
+    ? 'bg-[#4B88D6]'
+    : isLastRunPartial
+    ? 'bg-[#D99A1E]'
+    : 'bg-[#D4412F]';
+
+  // Format last run time (Channel IST)
+  let lastRunTimeStr = 'Sat 4:32 AM IST · 6 of 6 uploaded';
   if (lastRun?.finished_at) {
     try {
-      const dayName = formatWeekdayET(lastRun.finished_at);
-      const timeStr = formatTimeET(lastRun.finished_at);
+      const dayName = formatWeekdayIST(lastRun.finished_at);
+      const timeStr = formatTimeIST(lastRun.finished_at);
       const up = lastRun.uploaded || 0;
       const sched = lastRun.scheduled || 0;
-      const total = up + sched || 6;
-      lastRunTimeStr = `${dayName} ${timeStr} · ${total} of ${total} uploaded`;
+      const failedCount = lastRun.failed || 0;
+      const okCount = up + sched;
+      const total = okCount + failedCount || 6;
+
+      if (isLastRunWaiting) {
+        lastRunTimeStr = `${dayName} ${timeStr} · Waiting (${lastRun.next_attempt_at || 'retry soon'})`;
+      } else if (lastRun.status === 'failed' && (lastRun.message || '').includes('Curation produced 0')) {
+        lastRunTimeStr = `${dayName} ${timeStr} · Curation found 0/6 clips`;
+      } else {
+        lastRunTimeStr = `${dayName} ${timeStr} · ${okCount} of ${total} uploaded${failedCount > 0 ? ` · ${failedCount} failed` : ''}`;
+      }
     } catch {
       // fallback
     }
   }
 
-  // Format next run time (Channel ET)
-  let nextRunTimeStr = 'Next run Sun 6 PM ET';
-  if (pipelineStatus?.next_run_time) {
+  // Format next run time (Channel IST)
+  let nextRunTimeStr = 'Next run Mon 4:30 AM IST';
+  if (isLastRunWaiting && lastRun?.next_attempt_at) {
+    nextRunTimeStr = `Next attempt ${lastRun.next_attempt_at}`;
+  } else if (pipelineStatus?.next_run_time) {
     try {
-      const dayName = formatWeekdayET(pipelineStatus.next_run_time);
-      const timeStr = formatTimeET(pipelineStatus.next_run_time);
+      const dayName = formatWeekdayIST(pipelineStatus.next_run_time);
+      const timeStr = formatTimeIST(pipelineStatus.next_run_time);
       nextRunTimeStr = `Next run ${dayName} ${timeStr}`;
     } catch {
       // fallback
@@ -123,21 +152,23 @@ export const Rail: React.FC<RailProps> = ({
         {/* Pipeline status card */}
         <div className="bg-[#2A4F43] rounded-[12px] p-[10px] xl:p-[14px] flex flex-col gap-[6px] shrink-0 w-full overflow-hidden border border-[#D5DBD5]/10">
           <div className="flex items-center gap-[8px]">
-            <span
-              className={`size-[8px] rounded-full shrink-0 ${
-                isLastRunPassed ? 'bg-[#2E7D4F]' : isLastRunPartial ? 'bg-[#D99A1E]' : 'bg-[#D4412F]'
-              }`}
-            />
+            <span className={`size-[8px] rounded-full shrink-0 ${dotColor}`} />
             <span className="hidden xl:inline font-ui font-semibold text-[13px] text-white whitespace-nowrap">
-              {isLastRunPassed ? 'Last run passed' : isLastRunPartial ? 'Last run partial' : 'Last run failed'}
+              {statusLabel}
             </span>
           </div>
           <p className="hidden xl:block font-ui text-[12px] text-[#B0C7BD] truncate">
             {lastRunTimeStr}
           </p>
-          <p className="hidden xl:block font-ui text-[12px] text-[#B0C7BD] truncate">
-            {nextRunTimeStr}
-          </p>
+          {pipelineStatus?.last_task_error ? (
+            <div className="hidden xl:flex items-start gap-[6px] p-[6px] rounded-[6px] bg-[#D4412F]/25 border border-[#D4412F]/50 text-[#FF9B8A] text-[11px] leading-tight">
+              <span className="font-ui font-semibold">{pipelineStatus.last_task_error}</span>
+            </div>
+          ) : (
+            <p className="hidden xl:block font-ui text-[12px] text-[#B0C7BD] truncate">
+              {nextRunTimeStr}
+            </p>
+          )}
         </div>
       </aside>
 

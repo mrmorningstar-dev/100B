@@ -1,3 +1,5 @@
+import os
+import sys
 import sqlite3
 import json
 from pathlib import Path
@@ -19,8 +21,27 @@ class AgentDatabase:
       - Schedule entries (hourly slots for Phase 4 YouTube Uploader)
     """
 
-    def __init__(self, db_path: Path):
-        self.db_path = db_path
+    def __init__(self, db_path: Optional[Path] = None):
+        target = Path(db_path or os.environ.get("AGENT_DB_PATH") or (Path(__file__).resolve().parent.parent / "data" / "agent.db")).resolve()
+
+        # Hard safety guard: under pytest or testing, NEVER touch the real agent/data/agent.db
+        is_testing = bool(
+            os.environ.get("PYTEST_CURRENT_TEST")
+            or os.environ.get("PYTEST_RUNNING")
+            or "pytest" in sys.modules
+            or os.environ.get("TESTING")
+        )
+        prod_db = (Path(__file__).resolve().parent.parent / "data" / "agent.db").resolve()
+        if is_testing and target == prod_db:
+            alt = os.environ.get("AGENT_DB_PATH")
+            if alt and Path(alt).resolve() != prod_db:
+                target = Path(alt).resolve()
+            else:
+                import tempfile
+                target = (Path(tempfile.gettempdir()) / "pytest_agent_test.db").resolve()
+                logger.warning(f"TEST SAFETY GUARD: Redirected AgentDatabase from production {prod_db} to temporary {target}")
+
+        self.db_path = target
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_tables()
 
@@ -329,14 +350,85 @@ class AgentDatabase:
         # Extend uploads table non-destructively
         try:
             uploads_cols = [r[1] for r in conn.execute("PRAGMA table_info(uploads)")]
+            if "privacy" not in uploads_cols:
+                conn.execute("ALTER TABLE uploads ADD COLUMN privacy TEXT DEFAULT 'private'")
             if "rights_status" not in uploads_cols:
                 conn.execute("ALTER TABLE uploads ADD COLUMN rights_status TEXT DEFAULT 'unreviewed'")
             if "rights_risk" not in uploads_cols:
                 conn.execute("ALTER TABLE uploads ADD COLUMN rights_risk INTEGER DEFAULT 0")
             if "claim_status" not in uploads_cols:
                 conn.execute("ALTER TABLE uploads ADD COLUMN claim_status TEXT DEFAULT 'none'")
+            if "uploaded_at" not in uploads_cols:
+                conn.execute("ALTER TABLE uploads ADD COLUMN uploaded_at TEXT")
+            if "attempts" not in uploads_cols:
+                conn.execute("ALTER TABLE uploads ADD COLUMN attempts INTEGER DEFAULT 0")
+            if "pacific_date" not in uploads_cols:
+                conn.execute("ALTER TABLE uploads ADD COLUMN pacific_date TEXT")
         except sqlite3.OperationalError:
             pass
+
+        # Extend claims table non-destructively (Phase 6.1)
+        try:
+            claims_cols = [r[1] for r in conn.execute("PRAGMA table_info(claims)")]
+            if "state" not in claims_cols:
+                conn.execute("ALTER TABLE claims ADD COLUMN state TEXT DEFAULT 'active'")
+            if "source" not in claims_cols:
+                conn.execute("ALTER TABLE claims ADD COLUMN source TEXT DEFAULT 'manual'")
+            if "detected_at" not in claims_cols:
+                conn.execute("ALTER TABLE claims ADD COLUMN detected_at TEXT")
+            if "last_seen_at" not in claims_cols:
+                conn.execute("ALTER TABLE claims ADD COLUMN last_seen_at TEXT")
+            if "released_at" not in claims_cols:
+                conn.execute("ALTER TABLE claims ADD COLUMN released_at TEXT")
+            if "message_id" not in claims_cols:
+                conn.execute("ALTER TABLE claims ADD COLUMN message_id TEXT")
+            if "track_title" not in claims_cols:
+                conn.execute("ALTER TABLE claims ADD COLUMN track_title TEXT")
+            if "track_artist" not in claims_cols:
+                conn.execute("ALTER TABLE claims ADD COLUMN track_artist TEXT")
+            if "affects_reach" not in claims_cols:
+                conn.execute("ALTER TABLE claims ADD COLUMN affects_reach INTEGER DEFAULT 0")
+            if "action_taken" not in claims_cols:
+                conn.execute("ALTER TABLE claims ADD COLUMN action_taken TEXT")
+        except sqlite3.OperationalError:
+            pass
+
+        # Phase 6.1: claim_emails (idempotent ingestion log)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS claim_emails (
+                message_id TEXT PRIMARY KEY,
+                thread_id TEXT,
+                received_at TEXT NOT NULL,
+                subject TEXT,
+                sender TEXT,
+                event_type TEXT,
+                matched_post_id TEXT,
+                matched_video_id TEXT,
+                status TEXT NOT NULL,
+                raw_snippet TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_claim_emails_status ON claim_emails(status);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_claim_emails_post_id ON claim_emails(matched_post_id);")
+
+        # Phase 6.1: claim_actions (audit log for auto-actions & dry-run simulations)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS claim_actions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                claim_id INTEGER,
+                post_id TEXT NOT NULL,
+                video_id TEXT,
+                action_type TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                dry_run INTEGER NOT NULL DEFAULT 1,
+                result TEXT NOT NULL,
+                details_json TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_claim_actions_claim_id ON claim_actions(claim_id);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_claim_actions_post_id ON claim_actions(post_id);")
 
         # Extend schedule table non-destructively
         try:
@@ -360,14 +452,15 @@ class AgentDatabase:
         except sqlite3.OperationalError:
             pass
 
-        # Seed the two confirmed claims: car clip kept (still public), goat clip pulled (deleted)
+        # Seed the confirmed claims: car clip kept/pending Studio check, goat clip pulled, delivery driver Fortunate Son
         cur = conn.execute("SELECT COUNT(*) FROM claims WHERE post_id = 'reddit_1xv7kmf'")
         if cur.fetchone()[0] == 0:
             conn.execute("""
                 INSERT INTO claims (
                     video_id, post_id, claim_type, claimant, asset_title,
-                    found_in, action, noted_at, source_name, uploader, notes
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    found_in, action, noted_at, source_name, uploader, notes,
+                    state, source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unknown_pending_confirmation', 'seed')
             """, (
                 "xwJJMYnUgSY",
                 "reddit_1xv7kmf",
@@ -382,15 +475,16 @@ class AgentDatabase:
                 "Recorded, near-duplicates blocked, marked possible false match"
             ))
         else:
-            conn.execute("UPDATE claims SET action = 'kept' WHERE post_id = 'reddit_1xv7kmf'")
+            conn.execute("UPDATE claims SET action = 'kept', state = 'unknown_pending_confirmation' WHERE post_id = 'reddit_1xv7kmf' AND state = 'active'")
 
         cur = conn.execute("SELECT COUNT(*) FROM claims WHERE post_id = 'reddit_1xrfauk'")
         if cur.fetchone()[0] == 0:
             conn.execute("""
                 INSERT INTO claims (
                     video_id, post_id, claim_type, claimant, asset_title,
-                    found_in, action, noted_at, source_name, uploader, notes
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    found_in, action, noted_at, source_name, uploader, notes,
+                    state, source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'removed', 'seed')
             """, (
                 "f38cep_p8p8",
                 "reddit_1xrfauk",
@@ -407,11 +501,67 @@ class AgentDatabase:
         else:
             conn.execute("UPDATE claims SET action = 'pulled' WHERE post_id = 'reddit_1xrfauk'")
 
+        # Phase 6.1: Seed Fortunate Son claim for reddit_1xw42j0 (Delivery Driver)
+        cur = conn.execute("SELECT COUNT(*) FROM claims WHERE post_id = 'reddit_1xw42j0'")
+        if cur.fetchone()[0] == 0:
+            conn.execute("""
+                INSERT INTO claims (
+                    video_id, post_id, claim_type, claimant, asset_title,
+                    track_title, track_artist, action, state, source, noted_at, detected_at,
+                    affects_reach, notes
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'held', 'active', 'manual', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 0, ?)
+            """, (
+                "HcwZS5Sxv_Y",
+                "reddit_1xw42j0",
+                "audio",
+                "unknown",
+                "Fortunate Son",
+                "Fortunate Son",
+                "Creedence Clearwater Revival",
+                "Seeded from YouTube Studio screenshot facts"
+            ))
+
+        # Phase 6.1: Deduplicate any manual placeholder claims that have a corresponding confirmed/email claim
+        try:
+            rows = conn.execute("""
+                SELECT c1.id AS placeholder_id, c2.id AS confirmed_id
+                FROM claims c1
+                JOIN claims c2 ON (
+                    (c1.video_id IS NOT NULL AND c1.video_id != '' AND c1.video_id = c2.video_id)
+                    OR c1.post_id = c2.post_id
+                ) AND c1.id != c2.id
+                  AND LOWER(COALESCE(c1.claim_type, '')) = LOWER(COALESCE(c2.claim_type, ''))
+                  AND (
+                      LOWER(COALESCE(c1.asset_title, '')) = LOWER(COALESCE(c2.asset_title, ''))
+                      OR LOWER(COALESCE(c1.track_title, '')) = LOWER(COALESCE(c2.asset_title, ''))
+                      OR LOWER(COALESCE(c1.asset_title, '')) = LOWER(COALESCE(c2.track_title, ''))
+                      OR LOWER(COALESCE(c1.track_title, '')) = LOWER(COALESCE(c2.track_title, ''))
+                  )
+                WHERE (LOWER(c1.claimant) IN ('unknown', 'unknown claimant', '') OR c1.source IN ('manual', 'seed'))
+                  AND (c2.source = 'email' OR LOWER(c2.claimant) NOT IN ('unknown', 'unknown claimant', ''))
+            """).fetchall()
+
+            for r in rows:
+                placeholder_id = r["placeholder_id"]
+                confirmed_id = r["confirmed_id"]
+                conn.execute("""
+                    UPDATE claims
+                    SET track_artist = COALESCE(claims.track_artist, (SELECT track_artist FROM claims WHERE id = ?)),
+                        track_title = COALESCE(claims.track_title, (SELECT track_title FROM claims WHERE id = ?))
+                    WHERE id = ?
+                """, (placeholder_id, placeholder_id, confirmed_id))
+                conn.execute("UPDATE claim_actions SET claim_id = ? WHERE claim_id = ?", (confirmed_id, placeholder_id))
+                conn.execute("DELETE FROM claims WHERE id = ?", (placeholder_id,))
+        except Exception as e:
+            logger.warning(f"Claims deduplication migration skipped: {e}")
+
         try:
             conn.execute("UPDATE uploads SET claim_status = 'claimed', rights_status = 'claimed', privacy = 'public' WHERE post_id = 'reddit_1xv7kmf'")
             conn.execute("UPDATE uploads SET claim_status = 'claimed', rights_status = 'claimed', status = 'deleted' WHERE post_id = 'reddit_1xrfauk'")
+            conn.execute("UPDATE uploads SET claim_status = 'claimed', rights_status = 'claimed' WHERE post_id = 'reddit_1xw42j0'")
             conn.execute("UPDATE schedule SET rights_status = 'claimed' WHERE post_id = 'reddit_1xv7kmf'")
             conn.execute("UPDATE schedule SET status = 'deleted' WHERE post_id = 'reddit_1xrfauk'")
+            conn.execute("UPDATE schedule SET rights_status = 'claimed' WHERE post_id = 'reddit_1xw42j0'")
         except sqlite3.OperationalError:
             pass
 
@@ -673,7 +823,11 @@ class AgentDatabase:
                 ))
 
     # --- Phase 3.5: Dynamic Source Registry Management ---
-    def seed_default_sources(self, subreddits: Optional[List[str]] = None) -> None:
+    def seed_default_sources(
+        self,
+        subreddits: Optional[List[str]] = None,
+        allowed_listings: Optional[List[str]] = None,
+    ) -> None:
         """Seed default active subreddits and multi-window archival streams into sources table if empty."""
         default_subs = subreddits or [
             "funny",
@@ -689,7 +843,7 @@ class AgentDatabase:
             "therewasanattempt",
             "MadeMeSmile",
         ]
-        default_listings = ["hot", "top_week", "top_month", "top_year"]
+        default_listings = allowed_listings or ["hot", "top_week", "top_month", "top_year"]
         now = datetime.now().isoformat()
         with self._get_connection() as conn:
             for sub in default_subs:
@@ -705,12 +859,20 @@ class AgentDatabase:
         total_budget: int = 10,
         active_ratio: float = 0.8,
         trial_ratio: float = 0.2,
+        allowed_listings: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         """Select ~80% active sources (ranked by yield) and ~20% trial sources for current fetch."""
-        self.seed_default_sources()
+        self.seed_default_sources(allowed_listings=allowed_listings)
         num_active = max(1, int(round(total_budget * active_ratio)))
         num_trial = max(1, total_budget - num_active)
         now = datetime.now().isoformat()
+
+        listings_filter = ""
+        params_filter: List[Any] = []
+        if allowed_listings:
+            placeholders = ",".join(["?"] * len(allowed_listings))
+            listings_filter = f"AND listing_mode IN ({placeholders})"
+            params_filter = list(allowed_listings)
 
         with self._get_connection() as conn:
             # Auto-reset exhausted archive sources older than 7 days back to active
@@ -720,20 +882,20 @@ class AgentDatabase:
                 WHERE status = 'exhausted' AND (julianday(?) - julianday(updated_at)) >= 7.0
             """, (now, now))
 
-            cur = conn.execute("""
+            cur = conn.execute(f"""
                 SELECT * FROM sources
-                WHERE status = 'active'
+                WHERE status = 'active' {listings_filter}
                 ORDER BY yield_rate DESC, approved_count DESC, id ASC
                 LIMIT ?
-            """, (num_active,))
+            """, params_filter + [num_active])
             active_rows = [dict(r) for r in cur.fetchall()]
 
-            cur = conn.execute("""
+            cur = conn.execute(f"""
                 SELECT * FROM sources
-                WHERE status = 'trial'
+                WHERE status = 'trial' {listings_filter}
                 ORDER BY last_used_date ASC NULLS FIRST, id ASC
                 LIMIT ?
-            """, (num_trial,))
+            """, params_filter + [num_trial])
             trial_rows = [dict(r) for r in cur.fetchall()]
 
             if len(trial_rows) < num_trial:
@@ -741,44 +903,78 @@ class AgentDatabase:
                 placeholders = ",".join([str(r["id"]) for r in active_rows]) if active_rows else "0"
                 cur = conn.execute(f"""
                     SELECT * FROM sources
-                    WHERE status = 'active' AND id NOT IN ({placeholders})
+                    WHERE status = 'active' AND id NOT IN ({placeholders}) {listings_filter}
                     ORDER BY yield_rate DESC, id ASC
                     LIMIT ?
-                """, (needed,))
+                """, params_filter + [needed])
                 active_rows.extend([dict(r) for r in cur.fetchall()])
 
             selected = active_rows + trial_rows
             return selected[:total_budget]
 
-    def get_deeper_archive_sources(self, loop_count: int = 2, limit: int = 6) -> List[Dict[str, Any]]:
+    def get_deeper_archive_sources(
+        self,
+        loop_count: int = 2,
+        limit: int = 4,
+        allowed_listings: Optional[List[str]] = None,
+        exclude_names: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
         """
         Phase 3.6: Fetch deeper pagination pages and alternative time windows
-        (top_month, top_year, top_all) for active sources before requesting new sources.
+        for active sources before requesting new sources.
+        Respects config listings: never requests top_month, top_year, or top_all unless
+        explicitly present in allowed_listings.
         """
-        self.seed_default_sources()
-        target_listings = ["top_month", "top_year"] if loop_count == 2 else ["top_year", "top_all", "top_month"]
+        self.seed_default_sources(allowed_listings=allowed_listings)
+        valid_listings = list(allowed_listings or ["hot", "top_day", "top_week"])
+
+        # Determine target archive listings from allowed_listings only
+        archive_candidates = [l for l in valid_listings if l != "hot"]
+        if not archive_candidates:
+            archive_candidates = ["hot"]
+
+        # Loop 2 targets top_week (or top_day if top_week not configured)
+        # Loop 3 targets deeper pagination or other allowed listings
+        if loop_count == 2:
+            target_listings = [l for l in ["top_week", "top_day"] if l in archive_candidates] or archive_candidates
+        else:
+            target_listings = [l for l in ["top_week", "top_day", "hot"] if l in valid_listings] or archive_candidates
+
+        # Strict guarantee: NEVER include heavy listings if not in allowed_listings
+        target_listings = [l for l in target_listings if l in valid_listings]
+        if not target_listings:
+            target_listings = [valid_listings[0]]
+
         placeholders = ",".join(["?"] * len(target_listings))
+        params: List[Any] = list(target_listings)
+
+        exclude_clause = ""
+        if exclude_names:
+            ex_placeholders = ",".join(["?"] * len(exclude_names))
+            exclude_clause = f"AND LOWER(name) NOT IN ({ex_placeholders})"
+            params.extend([n.lower() for n in exclude_names])
 
         with self._get_connection() as conn:
-            # First, check active sources in target archive time windows (prioritizing existing cursors)
+            # 1. First, check active sources in target archive time windows (prioritizing existing cursors & untried subs)
             cur = conn.execute(f"""
                 SELECT * FROM sources
-                WHERE status = 'active' AND listing_mode IN ({placeholders})
+                WHERE status = 'active' AND listing_mode IN ({placeholders}) {exclude_clause}
                 ORDER BY (pagination_cursor IS NOT NULL) DESC, yield_rate DESC, id ASC
                 LIMIT ?
-            """, target_listings + [limit])
+            """, params + [limit])
             rows = [dict(r) for r in cur.fetchall()]
 
             if len(rows) < limit:
-                # Supplement with active sources that have saved cursors
+                # Supplement with active sources in target listings even if tried before (deeper pagination)
                 existing_ids = [str(r["id"]) for r in rows] or ["0"]
                 id_placeholders = ",".join(existing_ids)
+                needed = limit - len(rows)
                 cur = conn.execute(f"""
                     SELECT * FROM sources
-                    WHERE status = 'active' AND id NOT IN ({id_placeholders}) AND listing_mode != 'hot'
-                    ORDER BY (pagination_cursor IS NOT NULL) DESC, yield_rate DESC
+                    WHERE status = 'active' AND id NOT IN ({id_placeholders}) AND listing_mode IN ({placeholders})
+                    ORDER BY (pagination_cursor IS NOT NULL) DESC, yield_rate DESC, id ASC
                     LIMIT ?
-                """, (limit - len(rows),))
+                """, list(target_listings) + [needed])
                 rows.extend([dict(r) for r in cur.fetchall()])
 
             return rows[:limit]

@@ -146,9 +146,19 @@ def test_db_setup(tmp_path, monkeypatch):
             claim_type TEXT NOT NULL,
             claimant TEXT NOT NULL,
             asset_title TEXT,
+            track_title TEXT,
+            track_artist TEXT,
             found_in TEXT,
             action TEXT NOT NULL,
+            state TEXT NOT NULL DEFAULT 'active',
+            source TEXT NOT NULL DEFAULT 'manual',
             noted_at TEXT NOT NULL,
+            detected_at TEXT,
+            last_seen_at TEXT,
+            released_at TEXT,
+            message_id TEXT,
+            affects_reach INTEGER DEFAULT 0,
+            action_taken TEXT,
             source_name TEXT,
             uploader TEXT,
             phashes_json TEXT,
@@ -216,6 +226,42 @@ def test_pipeline_status(client, test_db_setup):
     assert "last_run" in data
     assert data["last_run"]["status"] == "success"
     assert "next_run_time" in data
+
+
+def test_pipeline_status_includes_reddit_and_waiting_info(client, tmp_path, monkeypatch):
+    """Verify /api/pipeline/status returns reddit breaker status and next_attempt_at."""
+    agent_db = tmp_path / "agent.db"
+    conn = sqlite3.connect(str(agent_db))
+    conn.execute("""
+        CREATE TABLE daily_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            started_at TEXT NOT NULL,
+            finished_at TEXT,
+            status TEXT NOT NULL,
+            uploaded INTEGER DEFAULT 0,
+            scheduled INTEGER DEFAULT 4,
+            failed INTEGER DEFAULT 0,
+            message TEXT,
+            next_attempt_at TEXT
+        );
+    """)
+    conn.execute("""
+        INSERT INTO daily_runs (started_at, finished_at, status, uploaded, scheduled, failed, message, next_attempt_at)
+        VALUES ('2026-11-23T07:00:00', '2026-11-23T07:04:00', 'waiting', 0, 4, 0, 'Waiting for breaker', '10:00 AM IST')
+    """)
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(backend_db, "DB_PATH", agent_db)
+
+    resp = client.get("/api/pipeline/status")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["last_run"]["status"] == "waiting"
+    assert data["last_run"]["next_attempt_at"] == "10:00 AM IST"
+    assert "reddit" in data
+    assert data["reddit"]["status"] in ("ok", "throttled", "blocked")
+    assert "max_requests_per_day" in data["reddit"]
 
 
 def test_agent_days(client, test_db_setup):
@@ -972,7 +1018,7 @@ def test_put_schedule_preserves_all_comments_and_blank_lines(client, test_db_set
     expected_block = (
         "  - 22:00\n\n"
         "# Allowed sources and exploration targets (Reddit is primary; Twitter is experimental)\n"
-        "allowed_sources:"
+        "reddit:"
     )
     assert expected_block in normalized_saved
 
@@ -1017,32 +1063,30 @@ def test_rights_status_api(client, test_db_setup):
     assert "unreviewed_policy" in data
     assert "active_layers" in data
     assert "providers" in data
-    assert "audd" in data["providers"]
+    assert "shazam" in data["providers"]
     assert "google_vision" in data["providers"]
-    assert "errors_today" in data["providers"]["audd"]
+    assert "errors_today" in data["providers"]["shazam"]
     assert "stats" in data
 
 
-def test_rights_status_api_reports_invalid_audd_token(client, test_db_setup, monkeypatch):
-    """Test that invalid AudD token or recorded errors sets provider status to error and returns 'AudD: invalid token'."""
-    today_str = datetime.now().strftime("%Y-%m-%d")
+def test_rights_status_api_reports_shazam_failures(client, test_db_setup, monkeypatch):
+    """Test that mostly-failing Shazam requests set provider status to error."""
+    today_str = datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
     conn = sqlite3.connect(str(test_db_setup))
     conn.execute("""
         INSERT OR REPLACE INTO provider_usage (day, provider, calls, errors)
-        VALUES (?, 'audd', 13, 13)
+        VALUES (?, 'shazam', 13, 13)
     """, (today_str,))
     conn.commit()
     conn.close()
 
-    monkeypatch.setenv("AUDD_API_TOKEN", "f3ed6e678f1b19d032e2a0c40ed795d9")
-
     resp = client.get("/api/rights/status")
     assert resp.status_code == 200
     data = resp.json()
-    audd_prov = data["providers"]["audd"]
+    audd_prov = data["providers"]["shazam"]
     assert audd_prov["status"] == "error"
     assert audd_prov["errors_today"] == 13
-    assert audd_prov["error_message"] == "AudD: invalid token"
+    assert audd_prov["error_message"] == "Shazam: most recent requests failed"
     assert data["active_layers"]["layer2b_fingerprint"] is False
 
 
@@ -1310,3 +1354,105 @@ def test_rights_claims_history_and_recent_published(client, test_db_setup, monke
     assert priv_item["privacy"] == "private"
     assert priv_item["live_privacy"] == "private"
     assert priv_item["is_missing"] is False
+
+
+def test_rights_action_published_remove_record_and_delete(client, test_db_setup, monkeypatch):
+    """Verify that 'remove_record' and 'delete' properly purge records from uploads and schedule."""
+    conn = sqlite3.connect(str(test_db_setup))
+    today_str = datetime.now().strftime("%Y-%m-%d")
+
+    # Insert a missing clip and a normal published clip
+    conn.execute("""
+        INSERT OR REPLACE INTO uploads (post_id, target_date, slot_time, status, video_id, uploaded_at, privacy)
+        VALUES ('clip_to_remove', ?, '12:00:00', 'deleted', 'vid_missing_123', '2026-11-16T12:00:00', 'private')
+    """, (today_str,))
+    conn.execute("""
+        INSERT OR REPLACE INTO schedule (post_id, target_date, slot_time, slot_hour, video_path, title, status, created_at)
+        VALUES ('clip_to_remove', ?, '12:00:00', 12, 'dummy.mp4', 'Missing Video Title', 'deleted', '2026-11-16T12:00:00')
+    """, (today_str,))
+
+    conn.execute("""
+        INSERT OR REPLACE INTO uploads (post_id, target_date, slot_time, status, video_id, uploaded_at, privacy)
+        VALUES ('clip_to_delete', ?, '14:00:00', 'uploaded', 'vid_active_456', '2026-11-16T14:00:00', 'public')
+    """, (today_str,))
+    conn.execute("""
+        INSERT OR REPLACE INTO schedule (post_id, target_date, slot_time, slot_hour, video_path, title, status, created_at)
+        VALUES ('clip_to_delete', ?, '14:00:00', 14, 'dummy2.mp4', 'Active Video Title', 'uploaded', '2026-11-16T14:00:00')
+    """, (today_str,))
+    conn.commit()
+    conn.close()
+
+    headers = {"Content-Type": "application/json", "X-Dashboard-Request": "1"}
+
+    # 1. Failure without DELETE confirmation
+    resp_unconfirmed = client.post(
+        "/api/rights/action-published",
+        json={"post_id": "clip_to_remove", "video_id": "vid_missing_123", "action": "remove_record", "delete_confirmation": "NO"},
+        headers=headers,
+    )
+    assert resp_unconfirmed.status_code == 400
+    assert "Must type 'DELETE'" in resp_unconfirmed.json()["detail"]
+
+    # 2. Successfully remove missing record with 'remove_record'
+    resp_remove = client.post(
+        "/api/rights/action-published",
+        json={"post_id": "clip_to_remove", "video_id": "vid_missing_123", "action": "remove_record", "delete_confirmation": "DELETE"},
+        headers=headers,
+    )
+    assert resp_remove.status_code == 200
+    assert resp_remove.json()["success"] is True
+
+    # 3. Successfully delete active video with 'delete'
+    resp_delete = client.post(
+        "/api/rights/action-published",
+        json={"post_id": "clip_to_delete", "video_id": "vid_active_456", "action": "delete", "delete_confirmation": "DELETE"},
+        headers=headers,
+    )
+    assert resp_delete.status_code == 200
+    assert resp_delete.json()["success"] is True
+
+    # 4. Verify neither clip appears in /api/rights/published
+    resp_recent = client.get("/api/rights/published")
+    assert resp_recent.status_code == 200
+    recent_pids = [r["post_id"] for r in resp_recent.json()]
+    assert "clip_to_remove" not in recent_pids
+    assert "clip_to_delete" not in recent_pids
+
+
+def test_schedule_and_pipeline_status_preserves_et_fields_and_utc_instants(client, test_db_setup):
+    """
+    Verify /api/schedule and /api/pipeline/status:
+    1. Core scheduling stays strictly in ET: timezone="America/New_York".
+    2. Display timezone is provided as Asia/Kolkata (IST).
+    3. Slots remain in ET format (HH:MM).
+    4. Next run time and schedule timestamps remain valid ISO instants.
+    """
+    # 1. Check /api/schedule
+    resp_sched = client.get("/api/schedule")
+    assert resp_sched.status_code == 200
+    sched_data = resp_sched.json()
+
+    assert sched_data["timezone"] == "America/New_York"
+    assert sched_data.get("display_timezone") == "Asia/Kolkata"
+    assert isinstance(sched_data["slots"], list)
+    assert len(sched_data["slots"]) > 0
+    # Every slot must be an ET HH:MM representation
+    for s in sched_data["slots"]:
+        assert ":" in s
+        h, m = s.split(":")
+        assert 0 <= int(h) <= 23
+        assert 0 <= int(m) <= 59
+
+    # 2. Check /api/pipeline/status
+    resp_pipe = client.get("/api/pipeline/status")
+    assert resp_pipe.status_code == 200
+    pipe_data = resp_pipe.json()
+
+    assert pipe_data.get("channel_timezone") == "America/New_York"
+    assert pipe_data.get("display_timezone") == "Asia/Kolkata"
+    assert "next_run_time" in pipe_data
+    assert pipe_data["next_run_time"] is not None
+    # Must be parseable as a valid ISO instant
+    dt = datetime.fromisoformat(pipe_data["next_run_time"])
+    assert dt is not None
+

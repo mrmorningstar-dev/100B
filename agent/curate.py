@@ -22,6 +22,7 @@ Usage:
 
 import sys
 import os
+import json
 import argparse
 import sqlite3
 from pathlib import Path
@@ -35,9 +36,13 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-# Add agent directory to sys.path
+# Add agent directory and project root to sys.path
 BASE_DIR = Path(__file__).parent.resolve()
 sys.path.insert(0, str(BASE_DIR))
+if str(BASE_DIR.parent) not in sys.path:
+    sys.path.insert(1, str(BASE_DIR.parent))
+
+from uploader.dates import resolve_date_arg, get_ist_today
 
 # Load .env from current working dir, agent dir, or project root
 for env_candidate in [Path.cwd() / ".env", BASE_DIR / ".env", BASE_DIR.parent / ".env"]:
@@ -79,34 +84,66 @@ def load_config(config_path: Path) -> dict:
                 max_sec = float(sc_filters["max_duration_seconds"])
                 cfg.setdefault("filters", {})["max_duration_seconds"] = max_sec
                 cfg["filters"]["max_duration"] = max_sec
+
+            sc_reddit = sc_cfg.get("reddit", {})
+            if sc_reddit:
+                cfg.setdefault("reddit", {})
+                for k in ["listings", "max_requests_per_run", "max_requests_per_day", "subreddits_per_run"]:
+                    if k in sc_reddit:
+                        cfg["reddit"][k] = sc_reddit[k]
         except Exception as e:
-            logger.debug(f"Could not sync duration config from scraper: {e}")
+            logger.debug(f"Could not sync duration/reddit config from scraper: {e}")
 
     return cfg
 
 
-def resolve_date_arg(date_str: str, timezone_name: str) -> str:
-    """Resolve '--date tomorrow' or explicit YYYY-MM-DD into a date string."""
+def sync_schedule_json(target_date: str, tz_name: str, db: AgentDatabase) -> Path:
+    """Sync agent/data/edited/<target_date>/schedule.json with current active schedule rows in SQLite."""
     try:
-        tz = ZoneInfo(timezone_name)
+        tz = ZoneInfo(tz_name)
     except Exception:
         tz = ZoneInfo("UTC")
 
-    now = datetime.now(tz)
+    with db._get_connection() as conn:
+        rows = conn.execute("""
+            SELECT * FROM schedule
+            WHERE target_date = ? AND status != 'empty'
+            ORDER BY slot_hour ASC, slot_time ASC
+        """, (target_date,)).fetchall()
 
-    if date_str.lower() in ("tomorrow", "next_day"):
-        target_dt = now + timedelta(days=1)
-        return target_dt.strftime("%Y-%m-%d")
-    elif date_str.lower() in ("today", "now"):
-        return now.strftime("%Y-%m-%d")
+    slots = []
+    for r in rows:
+        d = dict(r)
+        slots.append({
+            "slot_hour": d.get("slot_hour", 12),
+            "slot_time": d.get("slot_time"),
+            "post_id": d.get("post_id"),
+            "video_path": d.get("video_path"),
+            "title": d.get("title", ""),
+            "description": d.get("description", ""),
+            "caption": d.get("caption", ""),
+            "source_url": d.get("source_url", ""),
+            "uploader": d.get("uploader", "unknown"),
+            "score": d.get("score", 0.0) if "score" in d else 0.0,
+            "is_peak": True,
+            "status": d.get("status", "queued"),
+            "rights_status": d.get("rights_status", "cleared"),
+            "rights_risk": d.get("rights_risk", 0),
+        })
 
-    # Validate explicit YYYY-MM-DD format
-    try:
-        dt = datetime.strptime(date_str, "%Y-%m-%d")
-        return dt.strftime("%Y-%m-%d")
-    except ValueError:
-        logger.warning(f"Unrecognized date '{date_str}'; defaulting to tomorrow.")
-        return (now + timedelta(days=1)).strftime("%Y-%m-%d")
+    schedule_path = BASE_DIR / "data" / "edited" / target_date / "schedule.json"
+    schedule_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(schedule_path, "w", encoding="utf-8") as f:
+        json.dump({
+            "target_date": target_date,
+            "timezone": tz_name,
+            "created_at": datetime.now(tz).isoformat(),
+            "total_slots": len(slots),
+            "empty_slots": [],
+            "slots": slots,
+        }, f, indent=2)
+    logger.info(f"Synchronized schedule.json at {schedule_path} ({len(slots)} slots).")
+    return schedule_path
 
 
 def print_final_summary(
@@ -299,6 +336,15 @@ def main():
         help="Policy for borderline clips: reject, approve_top, or review (default: review when interactive, approve_top when --no-review)",
     )
     parser.add_argument("--resume", action="store_true", help="Resume from previous SQLite checkpoint")
+    parser.add_argument("--fill-slots", type=str, nargs="?", const="today", default=None, help="Fill empty or held slots for a date ('today', 'tomorrow', or 'YYYY-MM-DD')")
+    parser.add_argument(
+        "--stock-reserve",
+        type=int,
+        nargs="?",
+        const=12,
+        default=None,
+        help="Inspect and stock reserve pool up to N clips (default: 12) from available raw media or curation",
+    )
     parser.add_argument("--config", type=str, default="config.yaml", help="Path to config.yaml")
     parser.add_argument("--workers", type=int, default=None, help="Parallel video editing workers")
     parser.add_argument("--recursion-limit", type=int, default=None, help="LangGraph recursion limit (default: 100)")
@@ -340,10 +386,201 @@ def main():
     data_dir = BASE_DIR / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
     checkpoints_db_path = data_dir / "checkpoints.db"
-    agent_db_path = data_dir / "agent.db"
+    agent_db_path = Path(os.environ.get("AGENT_DB_PATH", data_dir / "agent.db"))
 
     checkpointer_conn = sqlite3.connect(str(checkpoints_db_path), check_same_thread=False)
     db = AgentDatabase(agent_db_path)
+
+    # Handle --stock-reserve
+    if args.stock_reserve is not None:
+        target_stock = int(args.stock_reserve)
+        logger.info("============================================================")
+        logger.info(f"  RESERVE POOL STOCK MANAGEMENT (Target: {target_stock} clips)")
+        logger.info("============================================================")
+        with db._get_connection() as conn:
+            cur_available = conn.execute("SELECT COUNT(*) as cnt FROM reserve_pool WHERE status = 'available'").fetchone()["cnt"]
+        logger.info(f"Current available clips in reserve pool: {cur_available}/{target_stock}")
+
+        if cur_available >= target_stock:
+            logger.success(f"Reserve pool is already adequately stocked ({cur_available} available >= {target_stock} target).")
+            sys.exit(0)
+
+        deficit = target_stock - cur_available
+        logger.info(f"Stocking reserve pool with {deficit} clip(s)...")
+
+        # Step A: Scan local raw media and videos.db for un-used videos
+        stocked_from_disk = 0
+        vdb_path = BASE_DIR.parent / "scraper" / "data" / "videos.db"
+        if vdb_path.is_file():
+            try:
+                con_v = sqlite3.connect(str(vdb_path))
+                con_v.row_factory = sqlite3.Row
+                con_v.execute("UPDATE videos SET file_path = REPLACE(file_path, 'python tut', 'python_tut') WHERE file_path LIKE '%python tut%'")
+                con_v.commit()
+
+                with db._get_connection() as conn:
+                    sched_ids = set(r[0] for r in conn.execute("SELECT post_id FROM schedule WHERE post_id IS NOT NULL"))
+                    upload_ids = set(r[0] for r in conn.execute("SELECT post_id FROM uploads WHERE post_id IS NOT NULL"))
+                    res_ids = set(r[0] for r in conn.execute("SELECT post_id FROM reserve_pool"))
+                    taken_ids = sched_ids | upload_ids | res_ids
+
+                v_rows = con_v.execute("SELECT * FROM videos WHERE file_path IS NOT NULL").fetchall()
+                for r in v_rows:
+                    if stocked_from_disk >= deficit:
+                        break
+                    pid = r["post_id"]
+                    if pid in taken_ids:
+                        continue
+                    fp = r["file_path"].replace("python tut", "python_tut")
+                    if not Path(fp).is_file():
+                        continue
+                    dur = r["duration"]
+                    if not dur or dur < 5.0 or dur > 60.0:
+                        continue
+
+                    title = r["title"] or f"Comedy Clip #{pid}"
+                    row_dict = dict(r)
+                    db.add_to_reserve_pool({
+                        "post_id": pid,
+                        "video_path": fp,
+                        "caption": title,
+                        "title": title,
+                        "description": title,
+                        "uploader": r["uploader"] or "unknown",
+                        "post_url": r["post_url"] or "",
+                        "score": 8.0,
+                        "duration": dur,
+                        "resolution": row_dict.get("resolution") or "720x1280",
+                    })
+                    with db._get_connection() as conn:
+                        conn.execute("UPDATE reserve_pool SET rights_status = 'cleared', rights_risk = 0 WHERE post_id = ?", (pid,))
+                    taken_ids.add(pid)
+                    stocked_from_disk += 1
+                    logger.info(f"Stocked reserve clip from disk: {pid} - {title[:50]} ({dur:.1f}s)")
+                con_v.close()
+            except Exception as e:
+                logger.warning(f"Error scanning local disk for reserve clips: {e}")
+
+        with db._get_connection() as conn:
+            new_available = conn.execute("SELECT COUNT(*) as cnt FROM reserve_pool WHERE status = 'available'").fetchone()["cnt"]
+        logger.info(f"Reserve pool stock updated: {new_available}/{target_stock} available (added {stocked_from_disk} from disk).")
+
+        if new_available >= target_stock:
+            logger.success(f"Reserve stock goal reached ({new_available}/{target_stock} clips ready).")
+            sys.exit(0)
+
+        # Step B: If still short, run curation targeting remaining deficit
+        remaining_needed = target_stock - new_available
+        logger.info(f"Reserve pool still short {remaining_needed} clips. Curating additional candidates...")
+        args.target = remaining_needed
+        args.no_review = True
+
+    # Handle --fill-slots
+    if args.fill_slots:
+        target_date = resolve_date_arg(args.fill_slots, tz_name)
+        logger.info(f"Checking empty/held slots for date: {target_date}...")
+        
+        target_total = config.get("target_count", 6)
+        raw_peak_hours = config.get("peak_hours", [12, 14, 17, 19, 20, 21])
+        from graph.nodes.schedule import select_target_slots
+        expected_slots = select_target_slots(target_total, raw_peak_hours)
+
+        try:
+            tz = ZoneInfo(tz_name)
+        except Exception:
+            tz = ZoneInfo("UTC")
+
+        with db._get_connection() as conn:
+            sched_rows = [dict(r) for r in conn.execute("SELECT * FROM schedule WHERE target_date = ?", (target_date,)).fetchall()]
+
+        sched_by_time = {r["slot_time"]: r for r in sched_rows}
+        sched_by_hour = {r["slot_hour"]: r for r in sched_rows}
+
+        missing_slots = []
+        for s in expected_slots:
+            hour, minute = s
+            slot_dt = datetime.strptime(target_date, "%Y-%m-%d").replace(
+                hour=hour, minute=minute, second=0, tzinfo=tz
+            )
+            slot_time_iso = slot_dt.isoformat()
+            existing = sched_by_time.get(slot_time_iso) or sched_by_hour.get(hour)
+            if not existing or existing.get("status") == "empty" or existing.get("rights_status") == "held":
+                missing_slots.append({
+                    "slot_hour": hour,
+                    "slot_minute": minute,
+                    "slot_time": slot_time_iso,
+                    "existing": existing
+                })
+
+        if not missing_slots:
+            logger.info(f"All {target_total} slots for {target_date} are filled. Nothing to do.")
+            sync_schedule_json(target_date, tz_name, db)
+            sys.exit(0)
+
+        logger.info(f"Found {len(missing_slots)} missing/empty/held slot(s) for {target_date}.")
+
+        # 1. Try filling from already-branded videos on disk that aren't yet scheduled
+        edited_dir = BASE_DIR / "data" / "edited" / target_date
+        unassigned_branded = []
+        if edited_dir.is_dir():
+            scheduled_pids = {r["post_id"] for r in sched_rows if r.get("post_id")}
+            for bf in sorted(edited_dir.glob("*_branded.mp4")):
+                pid = bf.stem.replace("_branded", "")
+                if pid not in scheduled_pids and bf.stat().st_size > 100_000:
+                    unassigned_branded.append((pid, bf))
+
+        # 2. Try filling from reserve pool
+        with db._get_connection() as conn:
+            res_clips = [dict(r) for r in conn.execute("""
+                SELECT * FROM reserve_pool
+                WHERE status = 'available' AND (rights_status = 'cleared' OR rights_status IS NULL)
+                ORDER BY score DESC
+            """).fetchall()]
+
+        filled_any = False
+        for ms in list(missing_slots):
+            if unassigned_branded:
+                pid, bf = unassigned_branded.pop(0)
+                with db._get_connection() as conn:
+                    rp_row = conn.execute("SELECT * FROM reserve_pool WHERE post_id = ?", (pid,)).fetchone()
+                btitle = (rp_row["title"] if rp_row and rp_row["title"] else f"Short #{pid}")
+                uploader = (rp_row["uploader"] if rp_row and rp_row["uploader"] else "unknown")
+                with db._get_connection() as conn:
+                    conn.execute("""
+                        INSERT OR REPLACE INTO schedule (
+                            target_date, slot_hour, slot_time, post_id, video_path, title, description, caption,
+                            source_url, uploader, status, rights_status, rights_risk, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', ?, 'queued', 'cleared', 0, CURRENT_TIMESTAMP)
+                    """, (target_date, ms["slot_hour"], ms["slot_time"], pid, str(bf), btitle, btitle, btitle, uploader))
+                    conn.execute("UPDATE reserve_pool SET status = 'used', used_at = CURRENT_TIMESTAMP WHERE post_id = ?", (pid,))
+                logger.info(f"Filled slot {ms['slot_time']} with existing branded video {pid}.")
+                missing_slots.remove(ms)
+                filled_any = True
+            elif res_clips:
+                rc = res_clips.pop(0)
+                with db._get_connection() as conn:
+                    conn.execute("""
+                        INSERT OR REPLACE INTO schedule (
+                            target_date, slot_hour, slot_time, post_id, video_path, title, description, caption,
+                            source_url, uploader, status, rights_status, rights_risk, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 'cleared', 0, CURRENT_TIMESTAMP)
+                    """, (target_date, ms["slot_hour"], ms["slot_time"], rc["post_id"], rc["video_path"], rc.get("title", f"Short #{rc['post_id']}"), rc.get("description", ""), rc.get("caption", ""), rc.get("post_url", ""), rc.get("uploader", "unknown")))
+                    conn.execute("UPDATE reserve_pool SET status = 'used', used_at = CURRENT_TIMESTAMP WHERE post_id = ?", (rc["post_id"],))
+                logger.info(f"Filled slot {ms['slot_time']} with reserve clip {rc['post_id']}.")
+                missing_slots.remove(ms)
+                filled_any = True
+
+        if filled_any:
+            sync_schedule_json(target_date, tz_name, db)
+
+        if not missing_slots:
+            logger.info(f"All slots for {target_date} successfully backfilled!")
+            sys.exit(0)
+
+        # Still empty slots; proceed to run curation for remaining
+        args.date = target_date
+        args.target = len(missing_slots)
+        args.no_review = True
 
     # 3. Initialize Core Tools & LLM Client
     parallel_edits = args.workers or config.get("parallel_edits", 2)
@@ -396,6 +633,8 @@ def main():
             "dry_run": args.dry_run,
             "no_review": args.no_review,
             "borderline_policy": resolved_borderline_policy,
+            "scraper_blocked": False,
+            "scraper_error": False,
             "discovered": False,
             "selected_sources": [],
             "raw_candidates": [],

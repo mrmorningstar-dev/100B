@@ -9,13 +9,21 @@ from loguru import logger
 import httpx
 
 
-ALERTS_LOG_PATH = Path(__file__).resolve().parent / "logs" / "alerts.log"
+def get_alerts_log_path() -> Path:
+    env_path = os.getenv("ALERTS_LOG_PATH")
+    if env_path:
+        return Path(env_path)
+    return Path(__file__).resolve().parent / "logs" / "alerts.log"
+
+
+ALERTS_LOG_PATH = get_alerts_log_path()
 
 
 def _log_alert_to_file(alert_type: str, message: str, details: Optional[Dict[str, Any]] = None):
     """Fallback: append alert to alerts.log when Telegram is unavailable or fails."""
     try:
-        ALERTS_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        log_path = get_alerts_log_path()
+        log_path.parent.mkdir(parents=True, exist_ok=True)
         ts = datetime.now().isoformat()
         entry = {
             "timestamp": ts,
@@ -23,16 +31,17 @@ def _log_alert_to_file(alert_type: str, message: str, details: Optional[Dict[str
             "message": message,
             "details": details or {},
         }
-        with open(ALERTS_LOG_PATH, "a", encoding="utf-8") as f:
+        with open(log_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry) + "\n")
-        logger.info(f"Alert recorded in {ALERTS_LOG_PATH}")
+        logger.info(f"Alert recorded in {log_path}")
     except Exception as e:
         logger.error(f"Failed to write alert to file: {e}")
 
 
 def _show_windows_notification(title: str, message: str):
     """Show non-blocking native Windows toast or balloon notification."""
-    if sys.platform != "win32":
+    if sys.platform != "win32" or os.getenv("PYTEST_RUNNING") == "1":
+        return
         return
     try:
         # PowerShell script to show a Windows tray notification

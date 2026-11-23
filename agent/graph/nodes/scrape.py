@@ -37,9 +37,16 @@ def scrape_list_node(state: CurationState, scraper_tool: ScraperTool) -> Dict[st
     )
 
     logger.info(f"Scrape-list found {len(raw_candidates)} pre-download candidates.")
-    return {
+    res = {
         "raw_candidates": raw_candidates,
     }
+    if hasattr(scraper_tool, "is_scraper_blocked") and scraper_tool.is_scraper_blocked():
+        logger.warning("Scraper reported circuit breaker blocked state.")
+        res["scraper_blocked"] = True
+    elif (hasattr(scraper_tool, "has_scraper_error") and scraper_tool.has_scraper_error()) or getattr(scraper_tool, "last_scrape_status", None) == "error":
+        logger.error("Scraper reported non-zero crash/error state. Recording scraper_error.")
+        res["scraper_error"] = True
+    return res
 
 
 def download_node(
@@ -108,9 +115,12 @@ def download_node(
         final_candidates = vetted_candidates[:target_to_fetch]
 
     logger.info(f"Download node finalized {len(final_candidates)} clips ready for evaluation.")
-    return {
+    res = {
         "candidates": final_candidates,
     }
+    if hasattr(scraper_tool, "has_scraper_error") and scraper_tool.has_scraper_error():
+        res["scraper_error"] = True
+    return res
 
 
 def scrape_node(state: CurationState, scraper_tool: ScraperTool) -> Dict[str, Any]:
@@ -122,4 +132,13 @@ def scrape_node(state: CurationState, scraper_tool: ScraperTool) -> Dict[str, An
     temp_state = dict(state)
     temp_state["raw_candidates"] = list_res.get("raw_candidates", [])
     temp_state["vetted_candidates"] = list_res.get("raw_candidates", [])
-    return download_node(temp_state, scraper_tool)
+    if list_res.get("scraper_blocked"):
+        temp_state["scraper_blocked"] = True
+    if list_res.get("scraper_error"):
+        temp_state["scraper_error"] = True
+    down_res = download_node(temp_state, scraper_tool)
+    if list_res.get("scraper_blocked"):
+        down_res["scraper_blocked"] = True
+    if list_res.get("scraper_error"):
+        down_res["scraper_error"] = True
+    return down_res

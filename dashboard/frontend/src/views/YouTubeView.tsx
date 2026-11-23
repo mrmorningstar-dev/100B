@@ -2,7 +2,8 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { ExternalLink, Play, RefreshCw, Calendar as CalendarIcon, AlertCircle, Eye, ThumbsUp } from 'lucide-react';
 import { Thumb } from '../components/Thumb';
 import { StatusPill } from '../components/StatusPill';
-import { formatTimeET } from '../utils/timeFormat';
+import { ClaimChip } from '../components/ClaimChip';
+import { formatTimeIST, formatTimeETHint } from '../utils/timeFormat';
 import { stripHashtags } from '../utils/textFormat';
 
 export interface YouTubeClipItem {
@@ -29,6 +30,7 @@ export interface YouTubeClipItem {
 interface YouTubeDayResponse {
   date: string;
   day_header: string;
+  is_late_broadcast_window?: boolean;
   published_count: number;
   on_air_count: number;
   scheduled_count: number;
@@ -141,8 +143,14 @@ export const YouTubeView: React.FC<YouTubeViewProps> = ({
             YouTube
           </h1>
           <p className="font-ui text-[14px] text-[#6F7A73] mt-[8px]">
-            {data?.day_header || 'Daily broadcast rundown'} · Live playback and view metrics
+            {data?.date ? `Batch of ${data.date} (starts 10:30 PM IST)` : (data?.day_header || 'Daily broadcast rundown')} · Live playback and view metrics
           </p>
+          {data?.is_late_broadcast_window && (
+            <p className="font-ui text-[12px] text-[#2E7D4F] font-semibold mt-[4px] flex items-center gap-[6px]">
+              <span className="size-[6px] rounded-full bg-[#2E7D4F] animate-pulse" />
+              Note: Previous batch is still broadcasting its final slots (until ~7:30 AM IST).
+            </p>
+          )}
         </div>
 
         {/* Date switcher pill group */}
@@ -258,9 +266,16 @@ export const YouTubeView: React.FC<YouTubeViewProps> = ({
                         ${isSelected ? 'bg-[#DCEBE0]/60 ring-1 ring-[#2E7D4F]/30' : 'hover:bg-[#EDF0EC]/60'}`}
                     >
                       {/* Slot time */}
-                      <span className="font-ui font-bold text-[13px] text-[#1D3B33] w-[86px] shrink-0">
-                        {clip.time_display || formatTimeET(clip.slot_time)}
-                      </span>
+                      <div className="flex flex-col w-[115px] shrink-0">
+                        <span className="font-ui font-bold text-[13px] text-[#1D3B33] leading-tight">
+                          {formatTimeIST(clip.slot_time, { referenceDate: data?.date || selectedDayKey, showNextDay: true })}
+                        </span>
+                        {formatTimeETHint(clip.slot_time) && (
+                          <span className="font-mono text-[11px] text-[#8A958E] leading-tight mt-[1px]">
+                            ({formatTimeETHint(clip.slot_time)})
+                          </span>
+                        )}
+                      </div>
 
                       {/* 9:16 Thumb */}
                       <div className="w-[42px] shrink-0">
@@ -298,11 +313,7 @@ export const YouTubeView: React.FC<YouTubeViewProps> = ({
 
                       {/* Status Pill & Rights Badges */}
                       <div className="shrink-0 flex items-center gap-[6px]">
-                        {clip.claim_status === 'claimed' && (
-                          <span className="font-ui text-[11px] font-bold px-[8px] py-[3px] rounded-[6px] bg-[#D4412F]/15 text-[#D4412F] border border-[#D4412F]/30 uppercase tracking-wider">
-                            Claimed
-                          </span>
-                        )}
+                        <ClaimChip status={clip.claim_status} />
                         {clip.rights_status === 'held' && (
                           <span className="font-ui text-[11px] font-bold px-[8px] py-[3px] rounded-[6px] bg-[#D99A1E]/15 text-[#D99A1E] border border-[#D99A1E]/30 uppercase tracking-wider">
                             Held
@@ -332,9 +343,16 @@ export const YouTubeView: React.FC<YouTubeViewProps> = ({
                 <div className="flex items-start justify-between gap-[12px]">
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-[8px] flex-wrap">
-                      <span className="font-ui font-bold text-[13px] text-[#6F7A73]">
-                        {selectedClip.time_display || formatTimeET(selectedClip.slot_time)}
-                      </span>
+                      <div className="flex items-center gap-[6px] flex-wrap">
+                        <span className="font-ui font-bold text-[13px] text-[#1D3B33]">
+                          {formatTimeIST(selectedClip.slot_time, { referenceDate: data?.date || selectedDayKey, showNextDay: true })}
+                        </span>
+                        {formatTimeETHint(selectedClip.slot_time) && (
+                          <span className="font-mono text-[11px] text-[#8A958E]">
+                            ({formatTimeETHint(selectedClip.slot_time)})
+                          </span>
+                        )}
+                      </div>
                       {selectedClip.claim_status === 'claimed' && (
                         <span className="font-ui text-[11px] font-bold px-[8px] py-[3px] rounded-[6px] bg-[#D4412F]/15 text-[#D4412F] border border-[#D4412F]/30 uppercase tracking-wider">
                           Claimed
