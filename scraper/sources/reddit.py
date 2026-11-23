@@ -114,7 +114,9 @@ class RedditSource(BaseSource):
 
         # Locate registry database path for cursor persistence
         reg_path = config.get("registry", {}).get("db_path") or config.get("registry_db_path")
-        if not reg_path:
+        # Tests must never open the real agent.db (reading it can still touch the file, for example
+        # through a WAL checkpoint), so auto-discovery is production-only. Tests pass an explicit path.
+        if not reg_path and not is_testing:
             for cand_p in [
                 Path.cwd() / "agent" / "data" / "agent.db",
                 Path(__file__).resolve().parent.parent.parent / "agent" / "data" / "agent.db",
