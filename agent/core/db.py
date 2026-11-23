@@ -449,6 +449,10 @@ class AgentDatabase:
                 conn.execute("ALTER TABLE reserve_pool ADD COLUMN rights_risk INTEGER DEFAULT 0")
             if "rights_checked_at" not in reserve_cols:
                 conn.execute("ALTER TABLE reserve_pool ADD COLUMN rights_checked_at TEXT")
+            if "blocked_reason" not in reserve_cols:
+                conn.execute("ALTER TABLE reserve_pool ADD COLUMN blocked_reason TEXT")
+            if "rights_version" not in reserve_cols:
+                conn.execute("ALTER TABLE reserve_pool ADD COLUMN rights_version INTEGER DEFAULT 0")
         except sqlite3.OperationalError:
             pass
 
@@ -761,7 +765,7 @@ class AgentDatabase:
         with self._get_connection() as conn:
             cur = conn.execute("""
                 SELECT * FROM reserve_pool
-                WHERE status = 'available'
+                WHERE status = 'available' AND status NOT IN ('used', 'missing', 'blocked')
                 ORDER BY score DESC, added_at ASC
                 LIMIT ?
             """, (limit,))
@@ -780,6 +784,48 @@ class AgentDatabase:
                 SET status = 'used', used_at = ?
                 WHERE post_id IN ({placeholders})
             """, [now] + post_ids)
+
+    def mark_reserve_blocked(
+        self,
+        post_id: str,
+        reason: str,
+        risk_score: int = 100,
+        checked_at: Optional[str] = None,
+        rights_version: int = 2,
+    ) -> None:
+        """Mark reserve clip as blocked by rights check so it is never re-queried."""
+        now = checked_at or datetime.now().isoformat()
+        with self._get_connection() as conn:
+            conn.execute("""
+                UPDATE reserve_pool
+                SET status = 'blocked',
+                    rights_status = 'blocked',
+                    rights_risk = ?,
+                    rights_checked_at = ?,
+                    blocked_reason = ?,
+                    rights_version = ?
+                WHERE post_id = ?
+            """, (risk_score, now, reason, rights_version, post_id))
+
+    def mark_reserve_cleared(
+        self,
+        post_id: str,
+        risk_score: int = 0,
+        checked_at: Optional[str] = None,
+        rights_version: int = 2,
+    ) -> None:
+        """Record passed rights check on reserve clip."""
+        now = checked_at or datetime.now().isoformat()
+        with self._get_connection() as conn:
+            conn.execute("""
+                UPDATE reserve_pool
+                SET rights_status = 'cleared',
+                    rights_risk = ?,
+                    rights_checked_at = ?,
+                    blocked_reason = NULL,
+                    rights_version = ?
+                WHERE post_id = ?
+            """, (risk_score, now, rights_version, post_id))
 
     def mark_reserve_missing(self, post_ids: List[str]) -> None:
         """Mark reserved videos as missing if their files no longer exist on disk."""
@@ -821,6 +867,16 @@ class AgentDatabase:
                     s.get("rights_risk", 0),
                     now,
                 ))
+
+            # Transactionally mark scheduled reserve clips as used
+            scheduled_pids = [s["post_id"] for s in slots if s.get("post_id")]
+            if scheduled_pids:
+                placeholders = ",".join(["?"] * len(scheduled_pids))
+                conn.execute(f"""
+                    UPDATE reserve_pool
+                    SET status = 'used', used_at = ?
+                    WHERE post_id IN ({placeholders})
+                """, [now] + scheduled_pids)
 
     # --- Phase 3.5: Dynamic Source Registry Management ---
     def seed_default_sources(

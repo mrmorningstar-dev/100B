@@ -34,9 +34,11 @@ export const Rail: React.FC<RailProps> = ({
   const isLastRunPassed = lastRun?.status === 'success';
   const isLastRunPartial = lastRun?.status === 'partial';
   const isLastRunWaiting = lastRun?.status === 'waiting';
+  const isLastRunAuthRequired = lastRun?.status === 'auth_required';
 
   let statusLabel = 'Last run failed';
   if (isLastRunPassed) statusLabel = 'Last run passed';
+  else if (isLastRunAuthRequired) statusLabel = 'Waiting for YouTube login';
   else if (isLastRunPartial) statusLabel = 'Last run partial';
   else if (isLastRunWaiting) statusLabel = 'Waiting to retry';
 
@@ -44,12 +46,15 @@ export const Rail: React.FC<RailProps> = ({
     ? 'bg-[#2E7D4F]'
     : isLastRunWaiting
     ? 'bg-[#4B88D6]'
-    : isLastRunPartial
+    : (isLastRunPartial || isLastRunAuthRequired)
     ? 'bg-[#D99A1E]'
     : 'bg-[#D4412F]';
 
   // Format last run time (Channel IST)
   let lastRunTimeStr = 'Sat 4:32 AM IST · 6 of 6 uploaded';
+  if (isLastRunAuthRequired) {
+    lastRunTimeStr = 'Waiting for YouTube login';
+  }
   if (lastRun?.finished_at) {
     try {
       const dayName = formatWeekdayIST(lastRun.finished_at);
@@ -60,7 +65,9 @@ export const Rail: React.FC<RailProps> = ({
       const okCount = up + sched;
       const total = okCount + failedCount || 6;
 
-      if (isLastRunWaiting) {
+      if (isLastRunAuthRequired) {
+        lastRunTimeStr = `${dayName} ${timeStr} · Waiting for YouTube login`;
+      } else if (isLastRunWaiting) {
         lastRunTimeStr = `${dayName} ${timeStr} · Waiting (${lastRun.next_attempt_at || 'retry soon'})`;
       } else if (lastRun.status === 'failed' && (lastRun.message || '').includes('Curation produced 0')) {
         lastRunTimeStr = `${dayName} ${timeStr} · Curation found 0/6 clips`;

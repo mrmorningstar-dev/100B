@@ -1,5 +1,6 @@
 import os
 import re
+import time
 import json
 import shutil
 import sqlite3
@@ -363,6 +364,30 @@ def get_next_run_time_from_scheduler() -> Optional[str]:
     return info.get("next_run_iso")
 
 
+_YOUTUBE_AUTH_CACHE: Dict[str, Any] = {
+    "status": None,
+    "cached_at": 0.0,
+}
+
+
+def get_cached_youtube_auth() -> Dict[str, Any]:
+    """Check YouTube OAuth token validity, cached for 10 minutes to prevent API spam."""
+    global _YOUTUBE_AUTH_CACHE
+    now = time.time()
+    if _YOUTUBE_AUTH_CACHE["status"] is not None and (now - _YOUTUBE_AUTH_CACHE["cached_at"] < 600.0):
+        return _YOUTUBE_AUTH_CACHE["status"]
+
+    try:
+        from uploader.auth import check_youtube_auth
+        res = check_youtube_auth(secrets_dir=WORKSPACE_DIR / "uploader" / "secrets")
+    except Exception as e:
+        res = {"status": "error", "message": str(e)}
+
+    _YOUTUBE_AUTH_CACHE["status"] = res
+    _YOUTUBE_AUTH_CACHE["cached_at"] = now
+    return res
+
+
 def get_pipeline_status() -> Dict[str, Any]:
     """Return last run info from daily_runs, next run time, and task scheduler health."""
     with get_ro_connection() as conn:
@@ -447,6 +472,7 @@ def get_pipeline_status() -> Dict[str, Any]:
         "channel_timezone": "America/New_York",
         "display_timezone": "Asia/Kolkata",
         "reddit": reddit_status,
+        "youtube_auth": get_cached_youtube_auth(),
     }
 
 

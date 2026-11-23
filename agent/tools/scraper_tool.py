@@ -165,6 +165,90 @@ class ScraperTool:
         """Check whether the most recent scrape operation crashed or exited non-zero without being blocked."""
         return getattr(self, "last_scrape_status", "ok") == "error"
 
+    def get_reddit_status(self) -> Dict[str, Any]:
+        """Query Reddit gateway circuit breakers and budgets via scraper CLI."""
+        script_path = self.scraper_dir / "scrape.py"
+        cmd = [sys.executable, str(script_path), "--reddit-status"]
+        env = os.environ.copy()
+        env["PYTHONUTF8"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
+
+        try:
+            res = subprocess.run(
+                cmd,
+                cwd=str(self.scraper_dir),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=env,
+                timeout=30,
+            )
+            for line in reversed(res.stdout.splitlines()):
+                line = line.strip()
+                if line.startswith("{") and line.endswith("}"):
+                    return json.loads(line)
+            raise ValueError(f"No JSON line found in stdout. Stderr: {res.stderr[-200:]}")
+        except Exception as e:
+            logger.warning(f"Error getting Reddit status from scraper: {e}")
+            return {"status": "deferred", "reason": f"scraper_cli_error: {e}"}
+
+    def verify_subreddit(self, name: str) -> Dict[str, Any]:
+        """Verify candidate subreddit through Reddit gateway via scraper CLI."""
+        script_path = self.scraper_dir / "scrape.py"
+        cmd = [sys.executable, str(script_path), "--verify-subreddit", str(name)]
+        env = os.environ.copy()
+        env["PYTHONUTF8"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
+
+        try:
+            res = subprocess.run(
+                cmd,
+                cwd=str(self.scraper_dir),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=env,
+                timeout=30,
+            )
+            for line in reversed(res.stdout.splitlines()):
+                line = line.strip()
+                if line.startswith("{") and line.endswith("}"):
+                    return json.loads(line)
+            raise ValueError(f"No JSON line found in stdout. Stderr: {res.stderr[-200:]}")
+        except Exception as e:
+            logger.warning(f"Error verifying subreddit '{name}' via scraper: {e}")
+            return {"status": "deferred", "reason": f"scraper_cli_error: {e}"}
+
+    def recent_titles(self, sub: str, limit: int = 20) -> Dict[str, Any]:
+        """Fetch recent titles from subreddit or multireddit via scraper CLI."""
+        script_path = self.scraper_dir / "scrape.py"
+        cmd = [sys.executable, str(script_path), "--recent-titles", str(sub), "--limit", str(limit)]
+        env = os.environ.copy()
+        env["PYTHONUTF8"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
+
+        try:
+            res = subprocess.run(
+                cmd,
+                cwd=str(self.scraper_dir),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=env,
+                timeout=30,
+            )
+            for line in reversed(res.stdout.splitlines()):
+                line = line.strip()
+                if line.startswith("{") and line.endswith("}"):
+                    return json.loads(line)
+            raise ValueError(f"No JSON line found in stdout. Stderr: {res.stderr[-200:]}")
+        except Exception as e:
+            logger.warning(f"Error fetching recent titles for '{sub}' via scraper: {e}")
+            return {"status": "deferred", "reason": f"scraper_cli_error: {e}"}
+
     def download_candidates(
         self,
         candidates: List[Dict[str, Any]],

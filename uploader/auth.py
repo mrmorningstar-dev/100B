@@ -31,6 +31,75 @@ def get_secrets_paths(secrets_dir: Optional[Path] = None, manage: bool = False) 
     return sdir / "client_secret.json", sdir / token_filename
 
 
+def check_youtube_auth(secrets_dir: Optional[Path] = None, manage: bool = False) -> dict:
+    """
+    Check health of YouTube OAuth credentials without crashing or looping.
+    Attempts token refresh if expired.
+    Returns:
+        {
+            "status": "ok" | "expired" | "missing" | "error",
+            "message": str
+        }
+    Never logs or exposes secret tokens.
+    """
+    client_secret_path, token_path = get_secrets_paths(secrets_dir, manage=manage)
+    active_scopes = MANAGE_SCOPES if manage else SCOPES
+
+    if not token_path.is_file():
+        return {
+            "status": "missing",
+            "message": f"YouTube OAuth token file not found at {token_path.name}. Run 'python upload.py auth'."
+        }
+
+    try:
+        creds = Credentials.from_authorized_user_file(str(token_path), active_scopes)
+    except Exception as e:
+        return {
+            "status": "expired",
+            "message": f"Could not parse token file ({token_path.name}): {type(e).__name__}."
+        }
+
+    if not creds:
+        return {
+            "status": "expired",
+            "message": "Credentials could not be initialized from token file."
+        }
+
+    # If access token is expired or needs refresh
+    if creds.expired or not creds.valid:
+        if not creds.refresh_token:
+            return {
+                "status": "expired",
+                "message": "Token expired and no refresh token available. Re-authorization required."
+            }
+        try:
+            creds.refresh(Request())
+            # Save updated token
+            with open(token_path, "w", encoding="utf-8") as f:
+                f.write(creds.to_json())
+            return {
+                "status": "ok",
+                "message": "Token refreshed successfully."
+            }
+        except Exception as e:
+            err_str = str(e).lower()
+            if "invalid_grant" in err_str or "revoked" in err_str or "expired" in err_str:
+                return {
+                    "status": "expired",
+                    "message": "YouTube login expired or revoked (invalid_grant). Re-authorization required."
+                }
+            # Transient network, socket, or server error
+            return {
+                "status": "error",
+                "message": f"Temporary network error refreshing token: {type(e).__name__}."
+            }
+
+    return {
+        "status": "ok",
+        "message": "Token is valid."
+    }
+
+
 def authenticate_interactive(secrets_dir: Optional[Path] = None, manage: bool = False) -> Credentials:
     """
     Run one-time interactive OAuth2 authorization in the user's browser.

@@ -35,15 +35,8 @@ def discover_node(
     logger.info("--- [Node: DISCOVER] Running Daily LLM Discovery ---")
     target_date = state.get("target_date", "")
 
-    # Shared RedditGateway for budget and circuit breaker checks
-    try:
-        from scraper.core.reddit_gateway import RedditGateway
-        gateway = RedditGateway()
-    except Exception:
-        gateway = None
-
     # 1. Fresh Context Collection (deterministic plain code)
-    fresh_context = collect_fresh_context(db, config, gateway=gateway)
+    fresh_context = collect_fresh_context(db, config)
     fresh_titles = fresh_context.get("fresh_titles", [])
     active_sources = fresh_context.get("active_sources", [])
     top_reject_reasons = fresh_context.get("top_reject_reasons", [])
@@ -104,7 +97,6 @@ def discover_node(
         db=db,
         max_daily_trials=5,
         skip_online_check=state.get("dry_run", False),
-        gateway=gateway,
     )
 
     # 4. Add verified trial sources to registry

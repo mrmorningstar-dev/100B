@@ -8,6 +8,12 @@ from unittest.mock import patch, MagicMock
 from run_daily import DailyLockManager, is_pid_alive, run_step
 
 
+@pytest.fixture(autouse=True)
+def mock_default_youtube_auth():
+    with patch("uploader.auth.check_youtube_auth", return_value={"status": "ok", "account": "test", "expires_at": "2099-01-01T00:00:00Z"}):
+        yield
+
+
 def test_lock_acquire_and_release(tmp_path):
     lock_file = tmp_path / "test_daily.lock"
     manager = DailyLockManager(lock_file)
@@ -251,3 +257,57 @@ def test_main_scraper_blocked_waiting_status_before_19_ist(mock_step, mock_alert
         assert last_run["status"] == "waiting"
         assert "WAITING" in last_run["message"]
 
+
+
+
+@patch("run_daily.send_telegram_alert")
+@patch("run_daily.run_step")
+def test_main_retry_skips_curation_when_batch_already_curated(mock_step, mock_alert, tmp_path):
+    """A retry after a failed upload must not re-run curation (it would burn reserve clips)."""
+    import run_daily
+    lock_file = tmp_path / "daily.lock"
+    db_file = tmp_path / "test_agent.db"
+
+    sched_dir = tmp_path / "agent" / "data" / "edited" / "2026-11-20"
+    sched_dir.mkdir(parents=True, exist_ok=True)
+    slots = []
+    for i in range(6):
+        video = sched_dir / f"p{i}_branded.mp4"
+        video.write_bytes(b"x" * 100)
+        slots.append({"post_id": f"p{i}", "video_path": str(video), "status": "queued"})
+    (sched_dir / "schedule.json").write_text(json.dumps({"slots": slots}), encoding="utf-8")
+
+    with patch("run_daily.BASE_DIR", tmp_path), \
+         patch("run_daily.LOCK_FILE", lock_file), \
+         patch("run_daily.purge_old_media"), \
+         patch("sys.argv", ["run_daily.py", "--date", "2026-11-20", "--db-path", str(db_file)]):
+        mock_step.return_value = True
+        with pytest.raises(SystemExit) as exc_info:
+            run_daily.main()
+
+    assert exc_info.value.code == 0
+    commands = [str(call.args[1]) for call in mock_step.call_args_list]
+    assert not any("curate.py" in c for c in commands), "curation must be skipped"
+    assert any("upload.py" in c for c in commands), "upload must still run"
+
+
+def test_batch_already_curated_requires_ready_slots_with_files(tmp_path):
+    from run_daily import batch_already_curated
+    path = tmp_path / "schedule.json"
+    video = tmp_path / "a.mp4"
+    video.write_bytes(b"x")
+
+    ok_slot = {"post_id": "a", "video_path": str(video), "status": "queued"}
+    path.write_text(json.dumps({"slots": [ok_slot] * 2}), encoding="utf-8")
+    assert batch_already_curated(path, 2) is True
+    assert batch_already_curated(path, 6) is False            # not enough slots
+
+    missing = dict(ok_slot, video_path=str(tmp_path / "gone.mp4"))
+    path.write_text(json.dumps({"slots": [ok_slot, missing]}), encoding="utf-8")
+    assert batch_already_curated(path, 2) is False            # a video file is missing
+
+    empty = dict(ok_slot, status="empty")
+    path.write_text(json.dumps({"slots": [ok_slot, empty]}), encoding="utf-8")
+    assert batch_already_curated(path, 2) is False            # an empty slot
+    path.write_text("not json", encoding="utf-8")
+    assert batch_already_curated(path, 1) is False

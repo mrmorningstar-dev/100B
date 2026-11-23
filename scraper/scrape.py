@@ -154,6 +154,22 @@ def parse_args():
         "--force", action="store_true",
         help="Bypass circuit breaker and force scrape execution",
     )
+    parser.add_argument(
+        "--reddit-status", action="store_true",
+        help="Query Reddit gateway circuit breakers and budgets, print single JSON line, and exit",
+    )
+    parser.add_argument(
+        "--verify-subreddit", default=None,
+        help="Verify a candidate subreddit through Reddit gateway, print single JSON line, and exit",
+    )
+    parser.add_argument(
+        "--recent-titles", default=None,
+        help="Fetch recent titles from subreddit/multireddit via RSS gateway, print single JSON line, and exit",
+    )
+    parser.add_argument(
+        "--limit", type=int, default=20,
+        help="Max items for one-shot listing queries like --recent-titles (default: 20)",
+    )
 
     return parser.parse_args()
 
@@ -163,6 +179,317 @@ def main():
     date_str = args.date or datetime.now().strftime("%Y-%m-%d")
     config = load_yaml_config(args.config)
     config["force"] = bool(args.force)
+
+    # Directories
+    data_dir = BASE_DIR / config.get("general", {}).get("data_dir", "data")
+    logs_dir = BASE_DIR / config.get("general", {}).get("logs_dir", "logs")
+    db_path = str(data_dir / "videos.db")
+    db = VideoDatabase(db_path)
+
+    # One-shot Gateway CLI Commands (Clean single JSON line output to stdout, logs to stderr)
+    if args.reddit_status or args.verify_subreddit or args.recent_titles:
+        from core.reddit_gateway import RedditGateway, get_ist_today
+        gateway = RedditGateway(db=db, config=config)
+
+        if args.reddit_status:
+            logger.remove()
+            logger.add(sys.stderr, level="WARNING")
+
+            client_id = (os.getenv("REDDIT_CLIENT_ID") or "").strip()
+            client_secret = (os.getenv("REDDIT_CLIENT_SECRET") or "").strip()
+            is_placeholder = any(
+                ph in client_id.lower() or ph in client_secret.lower()
+                for ph in ["your_reddit", "client_id_here", "client_secret_here"]
+            )
+            mode = "praw" if (client_id and client_secret and not is_placeholder) else "open_feeds"
+
+            all_breakers = db.get_all_breakers()
+            breaker_dict = {}
+            for l in ["json", "rss", "praw", "about"]:
+                info = all_breakers.get(l) or {}
+                is_act, reason = gateway.check_circuit_breaker(layer=l)
+                breaker_dict[l] = {
+                    "blocked_until": info.get("blocked_until"),
+                    "is_open": is_act,
+                    "reason": reason,
+                    "consecutive_failures": info.get("consecutive_failures", 0),
+                }
+
+            any_layer_open = any(b["is_open"] for b in breaker_dict.values())
+            all_layers_open, _ = gateway.check_circuit_breaker()
+
+            today_ist = get_ist_today()
+            requests_today = db.get_requests_count_today(today_ist, host="reddit")
+            max_per_day = gateway.max_requests_per_day
+            requests_this_run_budget = gateway.max_requests_per_run
+            allowed_listings = config.get("reddit", {}).get("listings") or ["hot", "top_day", "top_week"]
+
+            status_data = {
+                "mode": mode,
+                "breaker": breaker_dict,
+                "any_layer_open": any_layer_open,
+                "all_layers_open": all_layers_open,
+                "requests_today": requests_today,
+                "max_per_day": max_per_day,
+                "requests_this_run_budget": requests_this_run_budget,
+                "allowed_listings": allowed_listings,
+            }
+            sys.stdout.write(json.dumps(status_data) + "\n")
+            sys.stdout.flush()
+            sys.exit(0)
+
+        if args.verify_subreddit:
+            logger.remove()
+            logger.add(sys.stderr, level="WARNING")
+            sub_name = args.verify_subreddit.strip().lstrip("r/").strip()
+
+            # Check breaker
+            is_blocked, block_reason = gateway.check_circuit_breaker(layer="about")
+            if not is_blocked:
+                is_blocked, block_reason = gateway.check_circuit_breaker(layer="json")
+            if is_blocked:
+                sys.stdout.write(json.dumps({
+                    "name": sub_name,
+                    "status": "deferred",
+                    "reason": f"circuit_breaker_open_{block_reason}",
+                    "subscribers": 0,
+                    "over18": False,
+                    "video_ratio": 0.0,
+                }) + "\n")
+                sys.stdout.flush()
+                sys.exit(0)
+
+            # Check budget
+            can_req, budget_reason = gateway.can_request("about")
+            if not can_req:
+                sys.stdout.write(json.dumps({
+                    "name": sub_name,
+                    "status": "deferred",
+                    "reason": f"budget_reached_{budget_reason}",
+                    "subscribers": 0,
+                    "over18": False,
+                    "video_ratio": 0.0,
+                }) + "\n")
+                sys.stdout.flush()
+                sys.exit(0)
+
+            # Perform check via gateway about.json
+            url = f"https://www.reddit.com/r/{sub_name}/about.json"
+            resp, status_flag = gateway.request(url, layer="about", use_cache=True, ttl_seconds=86400)
+
+            if not resp:
+                sys.stdout.write(json.dumps({
+                    "name": sub_name,
+                    "status": "deferred",
+                    "reason": f"gateway_refused_{status_flag}",
+                    "subscribers": 0,
+                    "over18": False,
+                    "video_ratio": 0.0,
+                }) + "\n")
+                sys.stdout.flush()
+                sys.exit(0)
+
+            if resp.status_code == 404:
+                sys.stdout.write(json.dumps({
+                    "name": sub_name,
+                    "status": "rejected",
+                    "reason": "subreddit_does_not_exist",
+                    "subscribers": 0,
+                    "over18": False,
+                    "video_ratio": 0.0,
+                }) + "\n")
+                sys.stdout.flush()
+                sys.exit(0)
+
+            if resp.status_code == 403:
+                sys.stdout.write(json.dumps({
+                    "name": sub_name,
+                    "status": "rejected",
+                    "reason": "subreddit_private_or_banned",
+                    "subscribers": 0,
+                    "over18": False,
+                    "video_ratio": 0.0,
+                }) + "\n")
+                sys.stdout.flush()
+                sys.exit(0)
+
+            if resp.status_code == 429:
+                sys.stdout.write(json.dumps({
+                    "name": sub_name,
+                    "status": "deferred",
+                    "reason": "rate_limited_429",
+                    "subscribers": 0,
+                    "over18": False,
+                    "video_ratio": 0.0,
+                }) + "\n")
+                sys.stdout.flush()
+                sys.exit(0)
+
+            if resp.status_code != 200:
+                sys.stdout.write(json.dumps({
+                    "name": sub_name,
+                    "status": "deferred",
+                    "reason": f"reddit_api_error_{resp.status_code}",
+                    "subscribers": 0,
+                    "over18": False,
+                    "video_ratio": 0.0,
+                }) + "\n")
+                sys.stdout.flush()
+                sys.exit(0)
+
+            try:
+                data_json = resp.json()
+                if "error" in data_json:
+                    err = data_json.get("error")
+                    msg = data_json.get("message", "")
+                    if err == 404 or msg == "Not Found":
+                        res_status, res_reason = "rejected", "subreddit_does_not_exist"
+                    elif err == 403 or msg == "Forbidden":
+                        res_status, res_reason = "rejected", "subreddit_private_or_banned"
+                    elif err == 429:
+                        res_status, res_reason = "deferred", "rate_limited_429"
+                    else:
+                        res_status, res_reason = "deferred", f"reddit_api_error_{err}"
+                    sys.stdout.write(json.dumps({
+                        "name": sub_name,
+                        "status": res_status,
+                        "reason": res_reason,
+                        "subscribers": 0,
+                        "over18": False,
+                        "video_ratio": 0.0,
+                    }) + "\n")
+                    sys.stdout.flush()
+                    sys.exit(0)
+
+                data = data_json.get("data") or {}
+                over18 = bool(data.get("over18", False))
+                subs = int(data.get("subscribers", 0) or 0)
+                quarantine = bool(data.get("quarantine", False))
+                sub_type = data.get("subreddit_type", "public")
+                allow_vid = data.get("allow_videos", True)
+                allow_gif = data.get("allow_videogifs", True)
+                sub_mode = data.get("submission_type", "any")
+
+                nsfw_keywords = ["nsfw", "over18", "over_18", "adult: true", "porn", "hentai", "sex", "18+"]
+                text_corpus = f"{data.get('title', '')} {data.get('public_description', '')}".lower()
+                has_nsfw_kw = any(kw in text_corpus for kw in nsfw_keywords)
+
+                if over18 or has_nsfw_kw:
+                    rej_reason = "over18_or_nsfw" if over18 else "nsfw_keywords"
+                    sys.stdout.write(json.dumps({
+                        "name": sub_name,
+                        "status": "rejected",
+                        "reason": rej_reason,
+                        "subscribers": subs,
+                        "over18": True,
+                        "video_ratio": 0.0,
+                    }) + "\n")
+                elif sub_type != "public":
+                    sys.stdout.write(json.dumps({
+                        "name": sub_name,
+                        "status": "rejected",
+                        "reason": f"non_public_subreddit_{sub_type}",
+                        "subscribers": subs,
+                        "over18": over18,
+                        "video_ratio": 0.0,
+                    }) + "\n")
+                elif quarantine:
+                    sys.stdout.write(json.dumps({
+                        "name": sub_name,
+                        "status": "rejected",
+                        "reason": "quarantined_subreddit",
+                        "subscribers": subs,
+                        "over18": over18,
+                        "video_ratio": 0.0,
+                    }) + "\n")
+                elif subs < 5000:
+                    sys.stdout.write(json.dumps({
+                        "name": sub_name,
+                        "status": "rejected",
+                        "reason": f"too_few_subscribers_{subs}",
+                        "subscribers": subs,
+                        "over18": over18,
+                        "video_ratio": 0.0,
+                    }) + "\n")
+                elif not allow_vid and not allow_gif and sub_mode == "self":
+                    sys.stdout.write(json.dumps({
+                        "name": sub_name,
+                        "status": "rejected",
+                        "reason": "videos_not_allowed",
+                        "subscribers": subs,
+                        "over18": over18,
+                        "video_ratio": 0.0,
+                    }) + "\n")
+                else:
+                    sys.stdout.write(json.dumps({
+                        "name": sub_name,
+                        "status": "verified",
+                        "reason": "ok",
+                        "subscribers": subs,
+                        "over18": False,
+                        "video_ratio": 1.0,
+                    }) + "\n")
+                sys.stdout.flush()
+                sys.exit(0)
+            except Exception as e:
+                sys.stdout.write(json.dumps({
+                    "name": sub_name,
+                    "status": "deferred",
+                    "reason": f"parse_error_{e}",
+                    "subscribers": 0,
+                    "over18": False,
+                    "video_ratio": 0.0,
+                }) + "\n")
+                sys.stdout.flush()
+                sys.exit(0)
+
+        if args.recent_titles:
+            logger.remove()
+            logger.add(sys.stderr, level="WARNING")
+            sub_name = args.recent_titles.strip().lstrip("r/").strip()
+            limit = args.limit or 20
+            url = f"https://www.reddit.com/r/{sub_name}/hot.rss"
+
+            is_blocked, block_reason = gateway.check_circuit_breaker(layer="rss")
+            if is_blocked:
+                sys.stdout.write(json.dumps({"status": "deferred", "reason": f"breaker_open_{block_reason}", "titles": []}) + "\n")
+                sys.stdout.flush()
+                sys.exit(0)
+
+            can_req, budget_reason = gateway.can_request("rss")
+            if not can_req:
+                sys.stdout.write(json.dumps({"status": "deferred", "reason": f"budget_reached_{budget_reason}", "titles": []}) + "\n")
+                sys.stdout.flush()
+                sys.exit(0)
+
+            resp, status_flag = gateway.request(url, layer="rss", use_cache=True, ttl_seconds=3600)
+            if not resp or resp.status_code != 200:
+                sys.stdout.write(json.dumps({
+                    "status": "deferred",
+                    "reason": f"http_status_{getattr(resp, 'status_code', status_flag)}",
+                    "titles": []
+                }) + "\n")
+                sys.stdout.flush()
+                sys.exit(0)
+
+            import xml.etree.ElementTree as ET
+            titles = []
+            try:
+                root = ET.fromstring(resp.text)
+                entries = root.findall("{http://www.w3.org/2005/Atom}entry")
+                for entry in entries:
+                    if len(titles) >= limit:
+                        break
+                    t_elem = entry.find("{http://www.w3.org/2005/Atom}title")
+                    if t_elem is not None and t_elem.text:
+                        titles.append(t_elem.text.strip())
+                sys.stdout.write(json.dumps({"status": "ok", "titles": titles}) + "\n")
+                sys.stdout.flush()
+                sys.exit(0)
+            except Exception as e:
+                sys.stdout.write(json.dumps({"status": "deferred", "reason": f"parse_error_{e}", "titles": []}) + "\n")
+                sys.stdout.flush()
+                sys.exit(0)
 
     # Override subreddits / twitter accounts in config if passed via CLI
     if args.subreddits:

@@ -156,6 +156,33 @@ describe('Rail Component Status Card Tests', () => {
     const text = container.textContent || '';
     expect(text).toContain('Directory not found: C:\\Drive-D\\python tut\\100B');
   });
+
+  it('renders "Waiting for YouTube login" status with amber indicator when status is auth_required', async () => {
+    const pipelineStatus: any = {
+      last_run: {
+        status: 'auth_required',
+        started_at: '2026-11-23T13:00:00Z',
+        finished_at: '2026-11-23T13:00:05Z',
+        uploaded: 0,
+        scheduled: 0,
+        failed: 0,
+      },
+      next_run_time: '2026-11-24T07:00:00+05:30',
+    };
+
+    await act(async () => {
+      root.render(
+        <Rail activeTab="agent" onTabChange={() => {}} pipelineStatus={pipelineStatus} />
+      );
+    });
+
+    const text = container.textContent || '';
+    expect(text).toContain('Waiting for YouTube login');
+
+    // Amber indicator dot
+    const amberDot = container.querySelector('.bg-\\[\\#D99A1E\\]');
+    expect(amberDot).not.toBeNull();
+  });
 });
 
 describe('AgentView Reddit Scraper Status Chip Tests', () => {

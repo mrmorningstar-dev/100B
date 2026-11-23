@@ -15,6 +15,7 @@ Automates the complete daily production and upload cycle:
 
 import sys
 import os
+import re
 import json
 import time
 import argparse
@@ -133,6 +134,32 @@ def run_step(name: str, cmd: list, timeout_s: int = 3600) -> bool:
         return False
 
 
+def batch_already_curated(schedule_path: Path, target_count: int) -> bool:
+    """
+    True when schedule.json already holds `target_count` ready slots (queued/scheduled/uploaded)
+    whose edited video files exist on disk.
+
+    A retry trigger (for example after the YouTube upload failed) must then go straight to the
+    upload step. Running curation again would replace clips and burn reserve-pool clips for nothing.
+    """
+    try:
+        with open(schedule_path, "r", encoding="utf-8") as f:
+            slots = json.load(f).get("slots", [])
+    except Exception:
+        return False
+    ready = 0
+    for slot in slots:
+        video_path = slot.get("video_path")
+        if (
+            slot.get("status") in ("queued", "scheduled", "uploaded")
+            and slot.get("post_id")
+            and video_path
+            and Path(video_path).is_file()
+        ):
+            ready += 1
+    return ready >= target_count
+
+
 def main():
     parser = argparse.ArgumentParser(description="100B Automated Video Bot — Daily Orchestration")
     parser.add_argument("--date", default="tomorrow", help="Target date ('tomorrow' or 'YYYY-MM-DD')")
@@ -178,12 +205,46 @@ def main():
 
         run_id = db.record_daily_run_start()
 
+        # Step 0: Early YouTube OAuth Health Guard (Phase 5)
+        if not args.dry_run:
+            from uploader.auth import check_youtube_auth
+            auth_info = check_youtube_auth(secrets_dir=BASE_DIR / "uploader" / "secrets")
+            if auth_info["status"] in ("expired", "missing"):
+                auth_msg = (
+                    "YouTube login expired. Run: python upload.py auth and "
+                    "python upload.py auth --manage on the machine to re-authorize."
+                )
+                logger.error(f"[Auth Guard] {auth_msg} Detail: {auth_info.get('message')}")
+                send_telegram_alert("AUTH_REQUIRED", auth_msg, {"detail": auth_info.get("message")})
+                db.record_daily_run_finish(
+                    run_id=run_id,
+                    status="auth_required",
+                    uploaded=0,
+                    scheduled=0,
+                    failed=0,
+                    message=f"Daily run halted for date {target_date_str}: {auth_msg}",
+                )
+                sys.exit(3)
+            elif auth_info["status"] == "error":
+                logger.warning(
+                    f"[Auth Guard] YouTube auth check returned transient error: {auth_info.get('message')}. "
+                    "Proceeding with run."
+                )
+
         logger.info(f"=== Starting Daily Bot Run for Date: {target_date_str} (Target: {target_count} clips | Dry Run: {args.dry_run}) ===")
 
         # Step 1: Curation
         curation_ok = True
         curated_count = 0
-        if not args.skip_curation:
+        reuse_existing_batch = (
+            not args.skip_curation and schedule_path.is_file() and batch_already_curated(schedule_path, target_count)
+        )
+        if reuse_existing_batch:
+            logger.info(
+                f"Batch for {target_date_str} is already curated ({target_count}/{target_count} slots ready on disk). "
+                "Skipping curation and going straight to upload."
+            )
+        if not args.skip_curation and not reuse_existing_batch:
             curate_cmd = [
                 sys.executable,
                 str(BASE_DIR / "agent" / "curate.py"),
@@ -201,7 +262,12 @@ def main():
             try:
                 with open(schedule_path, "r", encoding="utf-8") as f:
                     sched = json.load(f)
-                curated_count = len([s for s in sched.get("slots", []) if s.get("status") not in ("empty", "failed")])
+                curated_count = len([
+                    s for s in sched.get("slots", [])
+                    if s.get("status") not in ("empty", "failed", "held")
+                    and s.get("post_id")
+                    and (not s.get("video_path") or args.dry_run or Path(s.get("video_path")).is_file())
+                ])
             except Exception as e:
                 logger.warning(f"Could not read schedule.json at {schedule_path}: {e}")
                 curated_count = 0
@@ -224,7 +290,12 @@ def main():
                 try:
                     with open(schedule_path, "r", encoding="utf-8") as f:
                         sched = json.load(f)
-                    curated_count = len([s for s in sched.get("slots", []) if s.get("status") not in ("empty", "failed")])
+                    curated_count = len([
+                        s for s in sched.get("slots", [])
+                        if s.get("status") not in ("empty", "failed", "held")
+                        and s.get("post_id")
+                        and (not s.get("video_path") or args.dry_run or Path(s.get("video_path")).is_file())
+                    ])
                 except Exception:
                     pass
 
@@ -236,20 +307,19 @@ def main():
         vdb_path = BASE_DIR / "scraper" / "data" / "videos.db"
         if vdb_path.is_file():
             try:
-                scraper_dir = str(BASE_DIR / "scraper")
-                if scraper_dir not in sys.path:
-                    sys.path.insert(0, scraper_dir)
-                try:
-                    from core.db import VideoDatabase as ScraperVideoDb
-                    from core.reddit_gateway import RedditGateway
-                except ImportError:
-                    from scraper.core.db import VideoDatabase as ScraperVideoDb
-                    from scraper.core.reddit_gateway import RedditGateway
-                vdb = ScraperVideoDb(str(vdb_path))
-                gw = RedditGateway(db=vdb)
-                is_scraper_blocked, blocked_until_str = gw.check_circuit_breaker()
+                agent_dir = str(BASE_DIR / "agent")
+                if agent_dir not in sys.path:
+                    sys.path.insert(0, agent_dir)
+                from tools.scraper_tool import ScraperTool
+                st = ScraperTool(scraper_dir=BASE_DIR / "scraper")
+                r_status = st.get_reddit_status()
+                if r_status.get("all_layers_open") or r_status.get("any_layer_open"):
+                    is_scraper_blocked = True
+                    breaker = r_status.get("breaker", {})
+                    open_msgs = [f"{l} open ({breaker[l].get('reason')})" for l in breaker if breaker[l].get("is_open")]
+                    blocked_until_str = "; ".join(open_msgs) if open_msgs else "circuit breaker active"
             except Exception as e:
-                logger.debug(f"Could not check breaker: {e}")
+                logger.debug(f"Could not check breaker via ScraperTool: {e}")
 
         scrape_res_path = BASE_DIR / "scraper" / "data" / "candidates" / f"{target_date_str}_scrape_result.json"
         if scrape_res_path.is_file():
@@ -273,10 +343,11 @@ def main():
                         next_trigger = f"{th:02d}:00 IST"
                         break
 
+                time_match = re.search(r"(\d{1,2}:\d{2}\s*(?:AM|PM)?\s*IST)", str(blocked_until_str))
+                blocked_time_str = time_match.group(1) if time_match else (blocked_until_str or "circuit breaker active")
                 msg = (
                     f"Daily run WAITING for date {target_date_str}: "
-                    f"Scraper is blocked ({blocked_until_str or 'circuit breaker active'}). "
-                    f"Curated {curated_count}/{target_count} clips. "
+                    f"Scraper blocked until {blocked_time_str}, used {curated_count} reserve clips. "
                     f"Will retry at {next_trigger}."
                 )
                 logger.warning(msg)
@@ -486,11 +557,20 @@ def main():
 
         # Condition B: Curation gave fewer than target_count (e.g. 6) clips -> "partial"
         if not args.skip_curation and curated_count < target_count:
-            msg = (
-                f"Daily pipeline finished as PARTIAL for date {target_date_str}: "
-                f"Only {curated_count}/{target_count} clips were curated. "
-                f"Upload completed for the available clips."
-            )
+            if is_scraper_blocked:
+                time_match = re.search(r"(\d{1,2}:\d{2}\s*(?:AM|PM)?\s*IST)", str(blocked_until_str))
+                blocked_time_str = time_match.group(1) if time_match else (blocked_until_str or "cooldown")
+                msg = (
+                    f"Daily pipeline finished as PARTIAL for date {target_date_str}: "
+                    f"Scraper blocked until {blocked_time_str}, used {curated_count} reserve clips. "
+                    f"Upload completed for the available clips."
+                )
+            else:
+                msg = (
+                    f"Daily pipeline finished as PARTIAL for date {target_date_str}: "
+                    f"Only {curated_count}/{target_count} clips were curated. "
+                    f"Upload completed for the available clips."
+                )
             logger.warning(msg)
             db.record_daily_run_finish(
                 run_id=run_id,

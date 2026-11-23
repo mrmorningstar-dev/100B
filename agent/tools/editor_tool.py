@@ -64,7 +64,14 @@ class EditorTool:
                 env=env,
                 timeout=300,
             )
-            if res.returncode == 0 and output_video_path.exists():
+            if res.returncode == 0 and output_video_path.is_file():
+                file_size = output_video_path.stat().st_size
+                if file_size < 50_000:
+                    try:
+                        output_video_path.unlink()
+                    except Exception:
+                        pass
+                    return False, f"Editor produced truncated video ({file_size} bytes < 50KB)"
                 return True, f"Successfully edited {output_video_path.name}"
             else:
                 err = res.stderr[-400:] if res.stderr else res.stdout[-400:]

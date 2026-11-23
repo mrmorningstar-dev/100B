@@ -320,6 +320,172 @@ def compute_and_save_run_stats(db, final_state: dict, target_date: str) -> None:
         logger.warning(f"Could not record run_stats: {e}")
 
 
+PROTECTED_TODAY_PIDS = {
+    "reddit_1xvojvg",
+    "reddit_1xvw7dc",
+    "reddit_1xvvnmb",
+    "reddit_1xvh7rc",
+    "reddit_1xv78q4",
+    "reddit_1xvvfpr",
+}
+
+
+def release_orphan_reserve(db: AgentDatabase, dry_run: bool = False) -> List[Dict[str, Any]]:
+    """
+    Reconciles reserve_pool clips: any reserve row with status 'used' whose post_id
+    is NOT in the schedule table (any date) and NOT in uploads, and whose raw file
+    still exists on disk, goes back to 'available'.
+    Never touches today's batch (2026-11-23).
+    """
+    logger.info("Checking for orphan/burned reserve pool clips...")
+    with db._get_connection() as conn:
+        sched_ids = set(r[0] for r in conn.execute("SELECT post_id FROM schedule WHERE post_id IS NOT NULL").fetchall())
+        upload_ids = set(r[0] for r in conn.execute("SELECT post_id FROM uploads WHERE post_id IS NOT NULL").fetchall())
+        used_rows = [dict(r) for r in conn.execute("SELECT * FROM reserve_pool WHERE status = 'used'").fetchall()]
+
+    recovered = []
+    table = Table(title="Orphan Reserve Pool Reconciliation", show_header=True, header_style="bold cyan")
+    table.add_column("Post ID", style="dim")
+    table.add_column("Old Status")
+    table.add_column("New Status", style="green")
+    table.add_column("Reason")
+
+    for r in used_rows:
+        pid = r["post_id"]
+        if pid in PROTECTED_TODAY_PIDS:
+            continue
+        if pid in sched_ids or pid in upload_ids:
+            continue
+
+        raw_path = (r.get("video_path") or "").replace("python tut", "python_tut")
+        if not raw_path or not Path(raw_path).is_file():
+            continue
+
+        new_status = "available" if not dry_run else "available (dry-run)"
+        reason = f"Not scheduled/uploaded; raw media exists ({Path(raw_path).name})"
+        table.add_row(pid, "used", new_status, reason)
+        recovered.append({
+            "post_id": pid,
+            "old_status": "used",
+            "new_status": "available",
+            "reason": reason,
+            "video_path": raw_path,
+        })
+
+    console = Console()
+    if recovered:
+        console.print(table)
+        if not dry_run:
+            with db._get_connection() as conn:
+                for item in recovered:
+                    conn.execute(
+                        "UPDATE reserve_pool SET status = 'available', used_at = NULL WHERE post_id = ?",
+                        (item["post_id"],)
+                    )
+            logger.success(f"Successfully released {len(recovered)} orphan reserve clip(s) back to 'available'.")
+        else:
+            logger.info(f"[DRY-RUN] Found {len(recovered)} orphan reserve clip(s) to restore. No changes written.")
+    else:
+        logger.info("No orphan reserve clips found. All used clips are correctly accounted for.")
+
+    return recovered
+
+
+def rescreen_reserve(db: AgentDatabase, config: Optional[Dict[str, Any]] = None, dry_run: bool = False) -> List[Dict[str, Any]]:
+    """
+    Runs full rights check on every reserve clip with status 'available',
+    spaced by Shazam spacing, and marks blocked / cleared / needs_check.
+    Skips clips in schedule table for date >= today.
+    """
+    from core.rights.engine import RightsCheckEngine
+    logger.info("Starting reserve pool rights re-screening...")
+
+    tz_name = (config or {}).get("timezone", "America/New_York")
+    try:
+        today_str = datetime.now(ZoneInfo(tz_name)).strftime("%Y-%m-%d")
+    except Exception:
+        today_str = datetime.now().strftime("%Y-%m-%d")
+
+    with db._get_connection() as conn:
+        active_sched = set(r[0] for r in conn.execute(
+            "SELECT post_id FROM schedule WHERE target_date >= ? AND post_id IS NOT NULL", (today_str,)
+        ).fetchall())
+        candidates = [dict(r) for r in conn.execute("SELECT * FROM reserve_pool WHERE status = 'available'").fetchall()]
+
+    rights_engine = RightsCheckEngine(config=config, db=db)
+    results = []
+
+    table = Table(title="Reserve Pool Rights Re-screening", show_header=True, header_style="bold magenta")
+    table.add_column("Post ID", style="dim")
+    table.add_column("Old Status")
+    table.add_column("New Status")
+    table.add_column("Reason")
+
+    for r in candidates:
+        pid = r["post_id"]
+        if pid in PROTECTED_TODAY_PIDS or pid in active_sched:
+            logger.info(f"Skipping scheduled clip {pid} from re-screening (currently needed).")
+            continue
+
+        raw_path = (r.get("video_path") or "").replace("python tut", "python_tut")
+        if not raw_path or not Path(raw_path).is_file():
+            if not dry_run:
+                db.mark_reserve_missing([pid])
+            table.add_row(pid, "available", "missing", "Raw file not found on disk")
+            results.append({"post_id": pid, "old_status": "available", "new_status": "missing", "reason": "missing_file"})
+            continue
+
+        eval_res = rights_engine.evaluate_clip(
+            post_id=pid,
+            video_path=raw_path,
+            title=r.get("title", ""),
+            uploader=r.get("uploader", ""),
+            source_url=r.get("post_url", ""),
+            duration=r.get("duration"),
+        )
+
+        dec = eval_res.get("decision", "pass")
+        reasons = ", ".join(eval_res.get("reasons", [])) or "cleared"
+
+        if dec == "block":
+            new_st = "blocked"
+            if not dry_run:
+                db.mark_reserve_blocked(
+                    post_id=pid,
+                    reason=reasons,
+                    risk_score=eval_res.get("risk_score", 100),
+                    checked_at=eval_res.get("checked_at"),
+                    rights_version=2,
+                )
+        elif dec == "review":
+            new_st = "needs_check"
+        else:
+            new_st = "cleared"
+            if not dry_run:
+                db.mark_reserve_cleared(
+                    post_id=pid,
+                    risk_score=eval_res.get("risk_score", 0),
+                    checked_at=eval_res.get("checked_at"),
+                    rights_version=2,
+                )
+
+        table.add_row(pid, "available", new_st if not dry_run else f"{new_st} (dry-run)", reasons)
+        results.append({
+            "post_id": pid,
+            "old_status": "available",
+            "new_status": new_st,
+            "reason": reasons,
+        })
+
+        if not dry_run:
+            import time
+            time.sleep(3.0)
+
+    console = Console()
+    console.print(table)
+    return results
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Phase 3 Curation Agent — Automated Video Selection & Scheduling",
@@ -348,26 +514,38 @@ def main():
     parser.add_argument("--config", type=str, default="config.yaml", help="Path to config.yaml")
     parser.add_argument("--workers", type=int, default=None, help="Parallel video editing workers")
     parser.add_argument("--recursion-limit", type=int, default=None, help="LangGraph recursion limit (default: 100)")
+    parser.add_argument(
+        "--release-orphan-reserve",
+        action="store_true",
+        help="Reconcile and restore burned reserve clips that were marked 'used' but never scheduled or uploaded",
+    )
+    parser.add_argument(
+        "--rescreen-reserve",
+        action="store_true",
+        help="Re-screen all available reserve clips through the updated rights engine (Shazam)",
+    )
 
     args = parser.parse_args()
 
-    # Enforce API key for live runs (protect against approving junk in mock mode)
-    has_gemini = bool(
-        (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or os.getenv("GOOGLE_GENAI_API_KEY") or "").strip("'\" ")
-    )
-    has_anthropic = bool((os.getenv("ANTHROPIC_API_KEY") or "").strip("'\" "))
-
-    if not args.dry_run and not (has_gemini or has_anthropic):
-        logger.error("=" * 60)
-        logger.error("FATAL ERROR: LLM API Key is missing!")
-        logger.error("A real curation run (without --dry-run) requires GEMINI_API_KEY, GOOGLE_API_KEY, or ANTHROPIC_API_KEY in your .env file.")
-        logger.error("Please add your key to .env:")
-        logger.error("    GEMINI_API_KEY=AQ.Ab8... (or your Google AI Studio / Gemini key)")
-        logger.error("    ANTHROPIC_API_KEY=sk-ant-api03-...")
-        logger.error("Or run in simulation mode with:")
-        logger.error("    python curate.py --dry-run")
-        logger.error("=" * 60)
-        sys.exit(1)
+    # Maintenance tasks do not require LLM API key
+    if args.release_orphan_reserve or args.rescreen_reserve:
+        pass
+    elif not args.dry_run:
+        has_gemini = bool(
+            (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or os.getenv("GOOGLE_GENAI_API_KEY") or "").strip("'\" ")
+        )
+        has_anthropic = bool((os.getenv("ANTHROPIC_API_KEY") or "").strip("'\" "))
+        if not (has_gemini or has_anthropic):
+            logger.error("=" * 60)
+            logger.error("FATAL ERROR: LLM API Key is missing!")
+            logger.error("A real curation run (without --dry-run) requires GEMINI_API_KEY, GOOGLE_API_KEY, or ANTHROPIC_API_KEY in your .env file.")
+            logger.error("Please add your key to .env:")
+            logger.error("    GEMINI_API_KEY=AQ.Ab8... (or your Google AI Studio / Gemini key)")
+            logger.error("    ANTHROPIC_API_KEY=sk-ant-api03-...")
+            logger.error("Or run in simulation mode with:")
+            logger.error("    python curate.py --dry-run")
+            logger.error("=" * 60)
+            sys.exit(1)
 
     # 1. Load Config & Environment
     config_path = BASE_DIR / args.config
@@ -375,12 +553,10 @@ def main():
 
     # Resolve Date & Timezone
     tz_name = config.get("timezone", "America/New_York")
-    target_date = resolve_date_arg(args.date, tz_name)
-
-    logger.info("============================================================")
-    logger.info("  PHASE 3: LANGGRAPH VIDEO CURATION AGENT")
-    logger.info(f"  Target: {args.target} clips | Date: {target_date} ({tz_name}) | Dry-run: {args.dry_run}")
-    logger.info("============================================================")
+    if args.fill_slots:
+        target_date = resolve_date_arg(args.fill_slots, tz_name)
+    else:
+        target_date = resolve_date_arg(args.date, tz_name)
 
     # 2. Setup SQLite Checkpointer & Database
     data_dir = BASE_DIR / "data"
@@ -390,6 +566,28 @@ def main():
 
     checkpointer_conn = sqlite3.connect(str(checkpoints_db_path), check_same_thread=False)
     db = AgentDatabase(agent_db_path)
+
+    # Handle --release-orphan-reserve
+    if args.release_orphan_reserve:
+        release_orphan_reserve(db, dry_run=args.dry_run)
+        sys.exit(0)
+
+    # Handle --rescreen-reserve
+    if args.rescreen_reserve:
+        rescreen_reserve(db, config=config, dry_run=args.dry_run)
+        sys.exit(0)
+
+    # Auto reconcile orphan reserve clips at start of curation
+    if not args.dry_run and not args.fill_slots and args.stock_reserve is None:
+        release_orphan_reserve(db, dry_run=False)
+
+    logger.info("============================================================")
+    if args.fill_slots:
+        logger.info(f"  PHASE 3: FILLING MISSING SLOTS FOR {target_date} ({tz_name})")
+    else:
+        logger.info("  PHASE 3: LANGGRAPH VIDEO CURATION AGENT")
+        logger.info(f"  Target: {args.target} clips | Date: {target_date} ({tz_name}) | Dry-run: {args.dry_run}")
+    logger.info("============================================================")
 
     # Handle --stock-reserve
     if args.stock_reserve is not None:

@@ -24,6 +24,12 @@ interface PipelineStatusData {
     max_requests_per_day: number;
     blocked_until?: string | null;
   };
+  youtube_auth?: {
+    status: 'ok' | 'expired' | 'missing' | 'error';
+    account?: string | null;
+    expires_at?: string | null;
+    error?: string | null;
+  };
 }
 
 export const App: React.FC = () => {
@@ -58,6 +64,10 @@ export const App: React.FC = () => {
     setActiveTab('youtube');
   };
 
+  const isAuthExpired =
+    pipelineStatus?.youtube_auth?.status === 'expired' ||
+    pipelineStatus?.last_run?.status === 'auth_required';
+
   return (
     <div className="min-h-screen bg-[#EDF0EC] text-[#1D3B33] flex flex-row font-ui antialiased">
       {/* Navigation rail (sidebar on desktop/tablet, bottom bar on mobile) */}
@@ -69,6 +79,11 @@ export const App: React.FC = () => {
 
       {/* Main content view */}
       <main className="flex-1 flex flex-col min-h-screen overflow-x-hidden overflow-y-auto">
+        {isAuthExpired && (
+          <div className="bg-[#D4412F] text-white px-4 py-3 flex items-center gap-2 shrink-0 shadow-sm font-ui text-[14px]">
+            <span className="font-semibold">YouTube token expired. Re-run upload.py auth in terminal.</span>
+          </div>
+        )}
         {activeTab === 'agent' && (
           <ViewErrorBoundary key="agent" viewName="Agent">
             <AgentView

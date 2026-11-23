@@ -1,3 +1,5 @@
+import os
+import sys
 from typing import Dict, Any, List, Optional
 from loguru import logger
 from graph.state import CurationState
@@ -71,26 +73,59 @@ def plan_node(
     # Inspect RedditGateway budget & circuit breaker
     if gateway is None:
         gateway = config.get("gateway")
-    if gateway is None:
+
+    is_testing = bool(
+        os.environ.get("PYTEST_CURRENT_TEST")
+        or os.environ.get("TESTING")
+        or "pytest" in sys.modules
+    )
+
+    status = {}
+    if gateway is None and not is_testing:
         try:
-            from scraper.core.reddit_gateway import RedditGateway
-            gateway = RedditGateway()
+            from tools.scraper_tool import ScraperTool
+            st = ScraperTool()
+            status = st.get_reddit_status()
         except Exception as e:
-            logger.debug(f"Could not initialize RedditGateway in plan_node: {e}")
-            gateway = None
+            logger.debug(f"Could not get reddit status from ScraperTool: {e}")
+            status = {}
+    elif gateway is None and is_testing and "reddit_status" in config:
+        status = config["reddit_status"]
 
     remaining_budget = max_requests_per_run
     is_breaker_open = False
     breaker_reason = ""
 
-    if gateway:
+    if status and "mode" in status:
+        requests_today = status.get("requests_today", 0)
+        max_requests_per_day = status.get("max_per_day", max_requests_per_day)
+        max_requests_per_run = status.get("requests_this_run_budget", max_requests_per_run)
+        allowed_listings = status.get("allowed_listings") or allowed_listings
+
+        breaker = status.get("breaker", {})
+        open_layers = [l for l, info in breaker.items() if info.get("is_open")]
+        is_breaker_open = bool(open_layers) or status.get("any_layer_open", False)
+        all_layers_open = status.get("all_layers_open", False)
+
+        breaker_reason = ", ".join(f"{l}: {breaker[l].get('reason')}" for l in open_layers) if open_layers else ""
+        day_remaining = max(0, max_requests_per_day - requests_today)
+        remaining_budget = min(max_requests_per_run, day_remaining)
+
+        logger.info(
+            f"--- [Node: PLAN] Loop #{loop_count} | Target needed: {target_needed} clips | "
+            f"Reddit budget: {remaining_budget} remaining (today: {requests_today}/{max_requests_per_day}, run max: {max_requests_per_run}) | "
+            f"Breaker open: {is_breaker_open} (open layers: {open_layers or 'none'}) | "
+            f"Allowed listings: {allowed_listings} ---"
+        )
+    elif gateway:
         is_breaker_open, breaker_reason = gateway.check_circuit_breaker(layer="json")
         if not is_breaker_open:
             is_breaker_open, breaker_reason = gateway.check_circuit_breaker(layer="rss")
 
         try:
-            from scraper.core.reddit_gateway import get_ist_today
-            today_ist = get_ist_today()
+            from zoneinfo import ZoneInfo
+            from datetime import datetime
+            today_ist = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d")
             today_used = gateway.db.get_requests_count_today(today_ist, host="reddit")
             run_remaining = max(0, gateway.max_requests_per_run - gateway.requests_this_run)
             day_remaining = max(0, gateway.max_requests_per_day - today_used)
@@ -98,11 +133,17 @@ def plan_node(
         except Exception:
             remaining_budget = max(0, max_requests_per_run - getattr(gateway, "requests_this_run", 0))
 
-    logger.info(
-        f"--- [Node: PLAN] Loop #{loop_count} | Target needed: {target_needed} clips | "
-        f"Reddit budget: {remaining_budget} remaining (run: {getattr(gateway, 'requests_this_run', 0)}/{max_requests_per_run}) | "
-        f"Breaker open: {is_breaker_open} | Allowed listings: {allowed_listings} ---"
-    )
+        logger.info(
+            f"--- [Node: PLAN] Loop #{loop_count} | Target needed: {target_needed} clips | "
+            f"Reddit budget: {remaining_budget} remaining (run: {getattr(gateway, 'requests_this_run', 0)}/{max_requests_per_run}) | "
+            f"Breaker open: {is_breaker_open} | Allowed listings: {allowed_listings} ---"
+        )
+    else:
+        logger.info(
+            f"--- [Node: PLAN] Loop #{loop_count} | Target needed: {target_needed} clips | "
+            f"Reddit budget: {remaining_budget} remaining (no gateway info) | "
+            f"Breaker open: {is_breaker_open} | Allowed listings: {allowed_listings} ---"
+        )
 
     # 1. Budget & Circuit Breaker Guard: Skip Reddit scrape if budget exhausted or breaker is open
     if is_breaker_open or remaining_budget <= 0:

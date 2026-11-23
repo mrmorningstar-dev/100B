@@ -25,8 +25,8 @@ def test_editor_tool_subprocess_call(tmp_path):
         mock_proc.stderr = ""
         mock_run.return_value = mock_proc
 
-        # Create output file to satisfy exists() check
-        dummy_output.write_bytes(b"rendered video")
+        # Create output file to satisfy exists() and >= 50KB check
+        dummy_output.write_bytes(b"x" * 50_000)
 
         success, msg = tool.edit_single_video(
             input_video_path=dummy_input,

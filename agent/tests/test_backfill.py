@@ -50,7 +50,6 @@ def test_backfill_sufficient_reserves(mock_db):
         assert result["approved"][1]["already_edited"] is False
         assert result["approved"][1]["video_path"] == str(f1)
         mock_db.fetch_reserve_pool_candidates.assert_called_once_with(limit=20)
-        mock_db.mark_reserve_used.assert_called_once_with(["res1", "res2"])
 
 
 def test_backfill_insufficient_reserves_triggers_extra_loop(mock_db):
@@ -72,7 +71,6 @@ def test_backfill_insufficient_reserves_triggers_extra_loop(mock_db):
         assert result["trigger_extra_loop"] is True
         assert len(result["approved"]) == 2
         mock_db.fetch_reserve_pool_candidates.assert_called_once_with(limit=20)
-        mock_db.mark_reserve_used.assert_called_once_with(["res1"])
 
 
 def test_backfill_skips_missing_reserve_file(mock_db):
@@ -95,8 +93,7 @@ def test_backfill_skips_missing_reserve_file(mock_db):
 
         # Missing file was skipped and marked missing
         mock_db.mark_reserve_missing.assert_called_once_with(["res_missing"])
-        # Only valid file was used
-        mock_db.mark_reserve_used.assert_called_once_with(["res_valid"])
+        # Only valid file was selected (marked used transactionally upon schedule save)
         assert len(result["approved"]) == 2
         assert result["approved"][1]["post_id"] == "res_valid"
         assert result["trigger_extra_loop"] is False

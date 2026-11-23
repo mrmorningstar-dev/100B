@@ -78,15 +78,16 @@ def backfill_node(state: CurationState, db: AgentDatabase) -> Dict[str, Any]:
                 missing_ids.append(r["post_id"])
                 continue
 
-            # Verify reserve clip rights status (re-run if missing or stale > 7 days)
+            # Verify reserve clip rights status (skip re-check if cleared within 3 days and rights_version == 2)
             rights_status = r.get("rights_status")
             rights_checked_at = r.get("rights_checked_at")
+            rights_version = r.get("rights_version", 0) or 0
             is_stale = True
-            if rights_checked_at:
+            if rights_status == "cleared" and rights_checked_at and rights_version >= 2:
                 try:
                     from datetime import datetime, timedelta
                     dt_check = datetime.fromisoformat(rights_checked_at)
-                    if datetime.now() - dt_check < timedelta(days=7):
+                    if datetime.now() - dt_check < timedelta(days=3):
                         is_stale = False
                 except Exception:
                     is_stale = True
@@ -102,14 +103,32 @@ def backfill_node(state: CurationState, db: AgentDatabase) -> Dict[str, Any]:
                     duration=r.get("duration"),
                 )
                 if eval_res["decision"] == "block":
+                    reasons_str = ", ".join(eval_res.get("reasons", [])) or "blocked by rights engine"
                     logger.warning(
                         f"[Node: BACKFILL] Reserve clip '{r.get('post_id')}' failed rights check: "
-                        f"{eval_res.get('reasons')}. Skipping candidate."
+                        f"{reasons_str}. Marking as blocked in reserve_pool and skipping candidate."
                     )
+                    if db and hasattr(db, "mark_reserve_blocked"):
+                        db.mark_reserve_blocked(
+                            post_id=r["post_id"],
+                            reason=reasons_str,
+                            risk_score=eval_res.get("risk_score", 100),
+                            checked_at=eval_res.get("checked_at"),
+                            rights_version=2,
+                        )
                     continue
+
                 r["rights_status"] = "needs_check" if eval_res["decision"] == "review" else "cleared"
                 r["rights_risk"] = eval_res["risk_score"]
                 r["rights_checked_at"] = eval_res["checked_at"]
+                r["rights_version"] = 2
+                if db and hasattr(db, "mark_reserve_cleared") and r["rights_status"] == "cleared":
+                    db.mark_reserve_cleared(
+                        post_id=r["post_id"],
+                        risk_score=eval_res["risk_score"],
+                        checked_at=eval_res["checked_at"],
+                        rights_version=2,
+                    )
 
             valid_reserves.append(r)
             if len(valid_reserves) == shortage:
@@ -141,7 +160,7 @@ def backfill_node(state: CurationState, db: AgentDatabase) -> Dict[str, Any]:
                 if "caption" in r and not r.get("caption"):
                     r["caption"] = r.get("caption")
                 approved.append(r)
-            db.mark_reserve_used([r["post_id"] for r in valid_reserves])
+            # Reserve clips are marked 'used' transactionally in schedule_node upon assignment to slots
 
         remaining_shortage = target_count - len(approved)
         if remaining_shortage > 0:

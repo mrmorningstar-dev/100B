@@ -33,6 +33,7 @@ def test_run_daily_resolves_date_once_and_passes_explicit_date(tmp_path, monkeyp
     monkeypatch.setattr(run_daily, "run_step", mock_run_step)
 
     # Mock uploader config and alerts
+    monkeypatch.setattr("uploader.auth.check_youtube_auth", lambda **kw: {"status": "ok"})
     monkeypatch.setattr("upload.load_uploader_config", lambda: {"timezone": "America/New_York", "upload": {"max_uploads_per_day": 2}})
     monkeypatch.setattr("uploader.dates.resolve_date_arg", lambda d, tz, now=None: test_target_date)
     monkeypatch.setattr(run_daily, "send_telegram_alert", lambda *args, **kwargs: None)
