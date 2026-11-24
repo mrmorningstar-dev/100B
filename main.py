@@ -205,7 +205,7 @@ def main():
 
     channel_name = config.get("channel", {}).get("name", "LaughVault")
     handle = config.get("channel", {}).get("handle", "laughvault").lstrip("@")
-    logo = config.get("channel", {}).get("logo_path", "assets/channel_logo.png")
+    logo = config.get("channel", {}).get("logo_path", "assets/a-logo.png")
 
     print(f"\n🏷 Channel    : {channel_name} (@{handle})")
     print(f"   Caption    : {caption}")

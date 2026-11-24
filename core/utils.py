@@ -23,7 +23,7 @@ def load_config(config_path="config.yaml"):
                     data["channel"] = {
                         "name": "LaughVault",
                         "handle": "laughvault",
-                        "logo_path": str(project_root / "assets" / "channel_logo.png"),
+                        "logo_path": str(project_root / "assets" / "a-logo.png"),
                         "badge_path": str(project_root / "assets" / "badge.png"),
                         "verified": False,
                     }
@@ -42,7 +42,7 @@ def load_config(config_path="config.yaml"):
         "channel": {
             "name": "LaughVault",
             "handle": "laughvault",
-            "logo_path": str(project_root / "assets" / "channel_logo.png"),
+            "logo_path": str(project_root / "assets" / "a-logo.png"),
             "badge_path": str(project_root / "assets" / "badge.png"),
             "verified": False,
         },
