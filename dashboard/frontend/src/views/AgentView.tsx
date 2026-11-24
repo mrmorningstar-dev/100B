@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { apiFetch } from '../utils/api';
 import { ScoreChip } from '../components/ScoreChip';
 import { Thumb } from '../components/Thumb';
 import { ClaimChip } from '../components/ClaimChip';
@@ -79,7 +80,7 @@ export const AgentView: React.FC<AgentViewProps> = ({ onSelectClipForYouTube, re
     async function loadDays(isBackground = false) {
       try {
         if (!isBackground) setLoadingDays(true);
-        const resp = await fetch('/api/agent/days?days=7');
+        const resp = await apiFetch('/api/agent/days?days=7');
         if (!resp.ok) throw new Error('Failed to fetch days');
         const data = await resp.json();
         if (isMounted) {
@@ -123,7 +124,7 @@ export const AgentView: React.FC<AgentViewProps> = ({ onSelectClipForYouTube, re
       setLoadingDetail(true);
       setError(null);
       try {
-        const resp = await fetch(`/api/agent/day/${selectedDate}`);
+        const resp = await apiFetch(`/api/agent/day/${selectedDate}`);
         if (!resp.ok) throw new Error('Failed to fetch day details');
         const data = await resp.json();
         if (isMounted) {

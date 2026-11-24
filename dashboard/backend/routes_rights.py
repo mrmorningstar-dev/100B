@@ -53,17 +53,15 @@ def load_rights_config() -> Dict[str, Any]:
     return {}
 
 
+from dashboard.backend.security import verify_request_host
+
+
 def verify_rights_write_security(request: Request):
     """
     Security Rule: Require Custom Header, JSON content-type, and Host check.
     Matches the guard on the Schedule save route.
     """
-    host = request.headers.get("host", "").lower()
-    if not (host.startswith("127.0.0.1") or host.startswith("localhost") or host.startswith("testserver")):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Forbidden: Host check failed. Requests must originate from localhost/127.0.0.1.",
-        )
+    verify_request_host(request)
 
     content_type = request.headers.get("content-type", "")
     if "application/json" not in content_type.lower():

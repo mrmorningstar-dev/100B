@@ -20,5 +20,8 @@ export default defineConfig({
   test: {
     environment: 'happy-dom',
     globals: true,
+    env: {
+      NODE_ENV: 'test',
+    },
   },
 })

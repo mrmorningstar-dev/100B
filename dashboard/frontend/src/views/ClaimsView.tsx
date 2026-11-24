@@ -19,6 +19,7 @@ import { Thumb } from '../components/Thumb';
 import { ClaimChip } from '../components/ClaimChip';
 import { formatTimeIST, formatDateIST, formatTimeETHint } from '../utils/timeFormat';
 import { stripHashtags } from '../utils/textFormat';
+import { apiFetch } from '../utils/api';
 
 interface RightsStatusData {
   is_local_only: boolean;
@@ -203,13 +204,13 @@ export const ClaimsView: React.FC = () => {
     try {
       setLoading(true);
       const [resStatus, resSync, resReview, resPub, resClaims, resActions, resBlock] = await Promise.all([
-        fetch('/api/rights/status').then((r) => r.json()),
-        fetch('/api/rights/claims-sync-status').then((r) => r.json()),
-        fetch('/api/rights/review').then((r) => r.json()),
-        fetch('/api/rights/published').then((r) => r.json()),
-        fetch('/api/rights/claims').then((r) => r.json()),
-        fetch('/api/rights/claim-actions').then((r) => r.json()),
-        fetch('/api/rights/blocklist').then((r) => r.json()),
+        apiFetch('/api/rights/status').then((r) => r.json()),
+        apiFetch('/api/rights/claims-sync-status').then((r) => r.json()),
+        apiFetch('/api/rights/review').then((r) => r.json()),
+        apiFetch('/api/rights/published').then((r) => r.json()),
+        apiFetch('/api/rights/claims').then((r) => r.json()),
+        apiFetch('/api/rights/claim-actions').then((r) => r.json()),
+        apiFetch('/api/rights/blocklist').then((r) => r.json()),
       ]);
 
       setStatus(resStatus);
@@ -233,7 +234,7 @@ export const ClaimsView: React.FC = () => {
   const handleSyncNow = async () => {
     try {
       setSyncing(true);
-      const res = await fetch('/api/rights/claims-sync/trigger', {
+      const res = await apiFetch('/api/rights/claims-sync/trigger', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -258,7 +259,7 @@ export const ClaimsView: React.FC = () => {
   const handleToggleDryRun = async (newVal: boolean) => {
     try {
       setActionLoading(true);
-      const res = await fetch('/api/rights/claims-sync/toggle-dry-run', {
+      const res = await apiFetch('/api/rights/claims-sync/toggle-dry-run', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -285,7 +286,7 @@ export const ClaimsView: React.FC = () => {
     if (!studioPasteText.trim()) return;
     try {
       setParsingStudio(true);
-      const res = await fetch('/api/rights/parse-studio-paste', {
+      const res = await apiFetch('/api/rights/parse-studio-paste', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text: studioPasteText }),
@@ -316,7 +317,7 @@ export const ClaimsView: React.FC = () => {
         affects_reach: Boolean(studioParsed?.affects_reach),
         notes: 'Pasted from YouTube Studio',
       };
-      const res = await fetch('/api/rights/save-manual-claim', {
+      const res = await apiFetch('/api/rights/save-manual-claim', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -342,7 +343,7 @@ export const ClaimsView: React.FC = () => {
   const handleMarkClaimReleased = async (claimId?: number, postId?: string) => {
     try {
       setActionLoading(true);
-      const res = await fetch('/api/rights/mark-claim-released', {
+      const res = await apiFetch('/api/rights/mark-claim-released', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -365,7 +366,7 @@ export const ClaimsView: React.FC = () => {
   const handleUndoAutoHold = async (postId: string) => {
     try {
       setActionLoading(true);
-      const res = await fetch('/api/rights/undo-auto-hold', {
+      const res = await apiFetch('/api/rights/undo-auto-hold', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -390,7 +391,7 @@ export const ClaimsView: React.FC = () => {
 
   const handleOpenUnmatchedModal = async () => {
     try {
-      const res = await fetch('/api/rights/claim-emails/unmatched');
+      const res = await apiFetch('/api/rights/claim-emails/unmatched');
       const data = await res.json();
       setUnmatchedList(data || []);
       setUnmatchedModalOpen(true);
@@ -402,7 +403,7 @@ export const ClaimsView: React.FC = () => {
   const handleMarkClear = async (postId: string) => {
     try {
       setActionLoading(true);
-      const res = await fetch('/api/rights/mark-clear', {
+      const res = await apiFetch('/api/rights/mark-clear', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -425,7 +426,7 @@ export const ClaimsView: React.FC = () => {
   const handleHold = async (postId: string, videoId?: string) => {
     try {
       setActionLoading(true);
-      const res = await fetch('/api/rights/hold', {
+      const res = await apiFetch('/api/rights/hold', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -450,7 +451,7 @@ export const ClaimsView: React.FC = () => {
     if (!claimModalClip) return;
     try {
       setActionLoading(true);
-      const res = await fetch('/api/rights/mark-claimed', {
+      const res = await apiFetch('/api/rights/mark-claimed', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -488,7 +489,7 @@ export const ClaimsView: React.FC = () => {
 
     try {
       setActionLoading(true);
-      const res = await fetch('/api/rights/replace-from-reserve', {
+      const res = await apiFetch('/api/rights/replace-from-reserve', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -519,7 +520,7 @@ export const ClaimsView: React.FC = () => {
   const handlePublishedAction = async (postId: string, videoId: string | undefined, action: string) => {
     try {
       setActionLoading(true);
-      const res = await fetch('/api/rights/action-published', {
+      const res = await apiFetch('/api/rights/action-published', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -552,7 +553,7 @@ export const ClaimsView: React.FC = () => {
   };
 
   const handleBlocklistApprove = async (id: number) => {
-    await fetch(`/api/rights/blocklist/${id}/approve`, {
+    await apiFetch(`/api/rights/blocklist/${id}/approve`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -563,7 +564,7 @@ export const ClaimsView: React.FC = () => {
   };
 
   const handleBlocklistDismiss = async (id: number) => {
-    await fetch(`/api/rights/blocklist/${id}/dismiss`, {
+    await apiFetch(`/api/rights/blocklist/${id}/dismiss`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -574,7 +575,7 @@ export const ClaimsView: React.FC = () => {
   };
 
   const handleBlocklistToggle = async (id: number) => {
-    await fetch(`/api/rights/blocklist/${id}/toggle`, {
+    await apiFetch(`/api/rights/blocklist/${id}/toggle`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -587,7 +588,7 @@ export const ClaimsView: React.FC = () => {
   const handleAddManualBlocklist = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newBlockValue.trim()) return;
-    await fetch('/api/rights/blocklist/add', {
+    await apiFetch('/api/rights/blocklist/add', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

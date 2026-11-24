@@ -3,6 +3,11 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { Rail } from '../components/Rail';
 import { AgentView } from '../views/AgentView';
+import { Thumb } from '../components/Thumb';
+
+// Configure React 19 act() testing environment
+// @ts-ignore
+globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 // Mock global fetch for AgentView
 beforeEach(() => {
@@ -261,5 +266,58 @@ describe('AgentView Reddit Scraper Status Chip Tests', () => {
     // Green styling
     const greenChip = container.querySelector('.text-\\[\\#2E7D4F\\]');
     expect(greenChip).not.toBeNull();
+  });
+});
+
+describe('Thumb Media Token Expiry and Renewal Tests', () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    sessionStorage.clear();
+  });
+
+  afterEach(() => {
+    act(() => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
+  it('falls back on error (e.g. token expired), then retries and recovers when a new token is received', async () => {
+    // 1. Initial render with thumbnail URL
+    await act(async () => {
+      root.render(<Thumb src="/api/thumbs/clip1.jpg" alt="Test clip" />);
+    });
+
+    let img = container.querySelector('img');
+    expect(img).not.toBeNull();
+    expect(img?.getAttribute('src')).toBe('/api/thumbs/clip1.jpg');
+
+    // 2. Simulate image load failure (e.g. 401 token expired)
+    await act(async () => {
+      img?.dispatchEvent(new Event('error'));
+    });
+
+    // Verify it shows fallback placeholder
+    expect(container.querySelector('img')).toBeNull();
+    expect(container.querySelector('[data-testid="thumb-fallback"]')).not.toBeNull();
+
+    // 3. Renew token via custom event (dispatched on media token refresh)
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('dashboard:media-token-updated', {
+          detail: { token: 'new-valid-token-123', expiresAt: Math.floor(Date.now() / 1000) + 600 },
+        })
+      );
+    });
+
+    // 4. Verify Thumb has reset hasError and re-rendered with the new token
+    img = container.querySelector('img');
+    expect(img).not.toBeNull();
+    expect(img?.getAttribute('src')).toContain('token=new-valid-token-123');
   });
 });

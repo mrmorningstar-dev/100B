@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { apiFetch } from '../utils/api';
 import { Minus, Plus, Trash2, Clock, Check, AlertCircle, Sparkles, RefreshCw } from 'lucide-react';
 import { Thumb } from '../components/Thumb';
 import { StatusPill } from '../components/StatusPill';
@@ -91,7 +92,7 @@ export const ScheduleView: React.FC = () => {
     setLoading(true);
     setError(null);
     try {
-      const resp = await fetch('/api/schedule');
+      const resp = await apiFetch('/api/schedule');
       if (!resp.ok) throw new Error('Failed to load schedule config');
       const data: ScheduleApiResponse = await resp.json();
 
@@ -222,7 +223,7 @@ export const ScheduleView: React.FC = () => {
     setSaveSuccessMsg(null);
     try {
       const sorted = sortSlots(slots);
-      const resp = await fetch('/api/schedule', {
+      const resp = await apiFetch('/api/schedule', {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',

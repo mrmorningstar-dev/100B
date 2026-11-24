@@ -5,6 +5,7 @@ import { StatusPill } from '../components/StatusPill';
 import { ClaimChip } from '../components/ClaimChip';
 import { formatTimeIST, formatTimeETHint } from '../utils/timeFormat';
 import { stripHashtags } from '../utils/textFormat';
+import { apiFetch, getApiUrl, refreshMediaToken } from '../utils/api';
 
 export interface YouTubeClipItem {
   post_id: string;
@@ -54,17 +55,66 @@ export const YouTubeView: React.FC<YouTubeViewProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [selectedClip, setSelectedClip] = useState<YouTubeClipItem | null>(null);
   const [embedFailed, setEmbedFailed] = useState(false);
+  const [videoStreamUrl, setVideoStreamUrl] = useState<string | null>(null);
+  const [videoPosterUrl, setVideoPosterUrl] = useState<string | null>(null);
 
   const dateInputRef = useRef<HTMLInputElement>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const lastHandledErrorTimeRef = useRef<number>(0);
+
+  // Keep video stream link fixed per clip; do not re-generate on periodic token renewal or background polling
+  useEffect(() => {
+    if (!selectedClip?.stream_url) {
+      setVideoStreamUrl(null);
+      setVideoPosterUrl(null);
+      return;
+    }
+    setVideoStreamUrl(getApiUrl(selectedClip.stream_url, { isMedia: true }));
+    setVideoPosterUrl(selectedClip.thumb_url ? getApiUrl(selectedClip.thumb_url, { isMedia: true }) : null);
+  }, [selectedClip?.post_id, selectedClip?.stream_url, selectedClip?.thumb_url]);
+
+  // Refresh token and stream URL only on error (e.g. paused for >10 mins then seeking -> 401)
+  const handleVideoError = async () => {
+    const video = videoRef.current;
+    if (!video || !selectedClip?.stream_url) return;
+
+    // Avoid rapid retry loops
+    const now = Date.now();
+    if (now - lastHandledErrorTimeRef.current < 2000) return;
+    lastHandledErrorTimeRef.current = now;
+
+    const savedTime = video.currentTime;
+    const wasPaused = video.paused;
+
+    const newToken = await refreshMediaToken();
+    if (newToken) {
+      const freshUrl = getApiUrl(selectedClip.stream_url, { isMedia: true, token: newToken });
+      setVideoStreamUrl(freshUrl);
+
+      const handleLoaded = () => {
+        if (videoRef.current) {
+          videoRef.current.currentTime = savedTime;
+          if (!wasPaused) {
+            videoRef.current.play().catch(() => {});
+          }
+        }
+        video.removeEventListener('loadedmetadata', handleLoaded);
+      };
+      video.addEventListener('loadedmetadata', handleLoaded);
+    }
+  };
 
   // Compute query param for date
   const dateParam = selectedDayKey === 'custom' && customDate ? customDate : selectedDayKey;
 
   const fetchDayData = useCallback(async (isBackground = false) => {
-    if (!isBackground) setLoading(true);
+    if (!isBackground) {
+      setLoading(true);
+      setEmbedFailed(false);
+    }
     setError(null);
     try {
-      const resp = await fetch(`/api/youtube/day/${dateParam}`);
+      const resp = await apiFetch(`/api/youtube/day/${dateParam}`);
       if (!resp.ok) throw new Error('Failed to load YouTube status for this date');
       const json: YouTubeDayResponse = await resp.json();
       setData(json);
@@ -90,7 +140,6 @@ export const YouTubeView: React.FC<YouTubeViewProps> = ({
 
   // Initial and param-change fetch
   useEffect(() => {
-    setEmbedFailed(false);
     fetchDayData();
   }, [fetchDayData]);
 
@@ -394,11 +443,13 @@ export const YouTubeView: React.FC<YouTubeViewProps> = ({
                   ) : selectedClip.has_local_file ? (
                     /* Local HTML5 video with Range stream support */
                     <video
+                      ref={videoRef}
                       controls
                       playsInline
                       preload="metadata"
-                      poster={selectedClip.thumb_url}
-                      src={selectedClip.stream_url}
+                      poster={videoPosterUrl || undefined}
+                      src={videoStreamUrl || undefined}
+                      onError={handleVideoError}
                       className="w-full h-full object-contain"
                     >
                       Your browser does not support the video tag.

@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { Rail, type NavTab } from './components/Rail';
 import { ViewErrorBoundary } from './components/ViewErrorBoundary';
+import { UnlockModal } from './components/UnlockModal';
+import { apiFetch, getAuthToken, refreshMediaToken } from './utils/api';
 import { AgentView } from './views/AgentView';
 import { ScheduleView } from './views/ScheduleView';
 import { YouTubeView } from './views/YouTubeView';
@@ -36,10 +38,32 @@ export const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<NavTab>('agent');
   const [pipelineStatus, setPipelineStatus] = useState<PipelineStatusData | null>(null);
   const [targetClipForYouTube, setTargetClipForYouTube] = useState<string | null>(null);
+  const [isUnlockOpen, setIsUnlockOpen] = useState(false);
+
+  useEffect(() => {
+    const handleUnauthorized = () => {
+      setIsUnlockOpen(true);
+    };
+    window.addEventListener('dashboard:unauthorized', handleUnauthorized);
+    return () => window.removeEventListener('dashboard:unauthorized', handleUnauthorized);
+  }, []);
+
+  // Renew signed media token on page load if key is stored, and every ~8 minutes
+  useEffect(() => {
+    if (getAuthToken()) {
+      refreshMediaToken();
+    }
+    const mediaInterval = setInterval(() => {
+      if (getAuthToken()) {
+        refreshMediaToken();
+      }
+    }, 8 * 60 * 1000); // 8 minutes
+    return () => clearInterval(mediaInterval);
+  }, []);
 
   const fetchPipelineStatus = useCallback(async () => {
     try {
-      const resp = await fetch('/api/pipeline/status');
+      const resp = await apiFetch('/api/pipeline/status');
       if (resp.ok) {
         const data = await resp.json();
         setPipelineStatus(data);
@@ -111,6 +135,15 @@ export const App: React.FC = () => {
           </ViewErrorBoundary>
         )}
       </main>
+
+      {/* Unlock screen modal when DASHBOARD_API_KEY authentication is required */}
+      <UnlockModal
+        isOpen={isUnlockOpen}
+        onUnlocked={() => {
+          setIsUnlockOpen(false);
+          fetchPipelineStatus();
+        }}
+      />
     </div>
   );
 };

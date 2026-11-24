@@ -183,12 +183,8 @@ async def update_schedule(request: Request, body: ScheduleUpdateRequest):
     Retimes scheduled YouTube clips if manage scope is available.
     """
     # Security Rule: Require Custom Header, JSON content-type, and Host check
-    host = request.headers.get("host", "").lower()
-    if not (host.startswith("127.0.0.1") or host.startswith("localhost") or host.startswith("testserver")):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Forbidden: Host check failed. Requests must originate from localhost/127.0.0.1.",
-        )
+    from dashboard.backend.security import verify_request_host
+    verify_request_host(request)
 
     content_type = request.headers.get("content-type", "")
     if "application/json" not in content_type.lower():
