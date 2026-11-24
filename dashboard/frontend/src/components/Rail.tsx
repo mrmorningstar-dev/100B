@@ -109,10 +109,12 @@ export const Rail: React.FC<RailProps> = ({
       >
         {/* Brand header */}
         <div className="flex items-center gap-[12px] overflow-hidden w-full">
-          <div className="size-[44px] rounded-[22px] bg-[#D4412F] flex items-center justify-center shrink-0 shadow-sm">
-            <span className="font-heading font-extrabold text-[22px] text-white leading-none">
-              B
-            </span>
+          <div className="size-[44px] rounded-[22px] overflow-hidden shrink-0 shadow-sm border border-white/20 bg-[#17302B]">
+            <img
+              src="/avatar.png"
+              alt="Betterverse avatar"
+              className="w-full h-full object-cover block"
+            />
           </div>
           <div className="hidden xl:flex flex-col gap-px leading-tight overflow-hidden whitespace-nowrap">
             <span className="font-heading font-semibold text-[18px] text-white">

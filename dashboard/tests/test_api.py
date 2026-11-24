@@ -14,11 +14,15 @@ import dashboard.backend.routes_schedule as routes_sched
 import dashboard.backend.routes_youtube as routes_yt
 import dashboard.backend.thumbs as backend_thumbs
 import dashboard.backend.youtube_api as yt_api
+import dashboard.backend.security as sec
 
 
 @pytest.fixture
 def client():
-    return TestClient(app)
+    sec._FAILED_AUTH_LOG.clear()
+    token = sec.get_configured_api_key()
+    headers = {"x-dashboard-token": token} if token else {}
+    return TestClient(app, headers=headers)
 
 
 @pytest.fixture
