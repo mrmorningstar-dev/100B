@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Privacy Policy | Betterverse 100B</title>
+    <style>
+      body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #EDF0EC; color: #1D3B33; margin: 0; padding: 32px 16px; display: flex; justify-content: center; }
+      .container { max-width: 800px; width: 100%; background: #ffffff; padding: 40px; border-radius: 16px; border: 1px solid #D5DBD5; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
+      h1 { font-size: 32px; margin-top: 0; color: #1D3B33; }
+      h2 { font-size: 18px; margin-top: 24px; color: #1D3B33; }
+      p, li { font-size: 14.5px; line-height: 1.6; color: #33463F; }
+      a { color: #2E7D4F; text-decoration: none; font-weight: 600; }
+      a:hover { text-decoration: underline; }
+      .badge { display: inline-block; padding: 4px 12px; background: rgba(46, 125, 79, 0.1); color: #2E7D4F; border-radius: 999px; font-size: 12px; font-weight: 600; margin-bottom: 12px; }
+      .box { background: #EDF0EC; border: 1px solid #D5DBD5; border-radius: 8px; padding: 16px; margin: 16px 0; }
+      .nav-back { display: inline-block; margin-bottom: 24px; padding: 8px 16px; background: #1D3B33; color: #ffffff; border-radius: 8px; text-decoration: none; font-size: 13.5px; }
+      .nav-back:hover { background: #2A4F43; text-decoration: none; }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <a href="/" class="nav-back">← Back to Dashboard</a>
+      <div class="badge">Legal Documentation</div>
+      <h1>Privacy Policy</h1>
+      <p><em>Last updated: November 24, 2026 · Effective immediately for Betterverse &amp; 100B Automated Pipeline</em></p>
+      <hr style="border: 0; border-top: 1px solid #D5DBD5; margin: 24px 0;" />
+
+      <h2>1. Introduction &amp; Scope</h2>
+      <p>This Privacy Policy explains how <strong>Betterverse</strong> ("we", "our", or "the Service"), operating the 100B Automated YouTube Shorts curation and broadcasting system, accesses, stores, and protects user data and YouTube API credentials.</p>
+      <p>We strictly adhere to the <a href="https://developers.google.com/terms/api-services-user-data-policy" target="_blank" rel="noreferrer">Google API Services User Data Policy</a> and the <a href="https://www.youtube.com/t/terms" target="_blank" rel="noreferrer">YouTube Terms of Service</a>.</p>
+
+      <h2>2. Google &amp; YouTube API Data We Access</h2>
+      <p>When you authorize Betterverse via Google OAuth 2.0, our application requests only the minimum necessary scopes:</p>
+      <ul>
+        <li><strong>youtube.upload:</strong> Used solely to upload scheduled video shorts to your authorized YouTube channel.</li>
+        <li><strong>youtube.readonly:</strong> Used to inspect publish status, view metrics, and Content ID claim status.</li>
+        <li><strong>youtube:</strong> Used to manage scheduled broadcast publish times and video descriptions.</li>
+      </ul>
+
+      <h2>3. How Data Is Stored &amp; Protected</h2>
+      <div class="box">
+        <strong>Local Security Architecture:</strong> All Google OAuth tokens are stored exclusively on the operator's private PC in secured local directories. OAuth tokens are <strong>never</strong> transmitted to third parties, never uploaded to Vercel, and never stored in cloud databases.
+      </div>
+
+      <h2>4. Zero Data Sharing &amp; Limited Use</h2>
+      <p>We do not sell, rent, monetize, or transfer your Google user data. No data is used to train machine learning models, and no advertising cookies are used.</p>
+
+      <h2>5. Revoking Access &amp; Data Deletion</h2>
+      <p>You can revoke access to your YouTube channel at any time via <a href="https://myaccount.google.com/permissions" target="_blank" rel="noreferrer">Google Account Security Permissions</a>. Locally stored credentials can be removed by deleting the <code>uploader/secrets/</code> directory.</p>
+
+      <h2>6. Contact</h2>
+      <p>For questions or support, contact the developer at <a href="https://github.com/mrmorningstar-dev/100B" target="_blank" rel="noreferrer">github.com/mrmorningstar-dev/100B</a>.</p>
+    </div>
+  </body>
+</html>

@@ -7,6 +7,17 @@ import { AgentView } from './views/AgentView';
 import { ScheduleView } from './views/ScheduleView';
 import { YouTubeView } from './views/YouTubeView';
 import { ClaimsView } from './views/ClaimsView';
+import { PrivacyPolicyView } from './views/PrivacyPolicyView';
+import { TermsOfServiceView } from './views/TermsOfServiceView';
+
+const getInitialPage = (): 'dashboard' | 'privacy' | 'terms' => {
+  if (typeof window !== 'undefined') {
+    const p = window.location.pathname.toLowerCase();
+    if (p.includes('privacy')) return 'privacy';
+    if (p.includes('terms')) return 'terms';
+  }
+  return 'dashboard';
+};
 
 interface PipelineStatusData {
   last_run?: {
@@ -35,18 +46,38 @@ interface PipelineStatusData {
 }
 
 export const App: React.FC = () => {
+  const [currentPage, setCurrentPage] = useState<'dashboard' | 'privacy' | 'terms'>(getInitialPage);
   const [activeTab, setActiveTab] = useState<NavTab>('agent');
   const [pipelineStatus, setPipelineStatus] = useState<PipelineStatusData | null>(null);
   const [targetClipForYouTube, setTargetClipForYouTube] = useState<string | null>(null);
   const [isUnlockOpen, setIsUnlockOpen] = useState(false);
 
   useEffect(() => {
+    const handlePopState = () => {
+      setCurrentPage(getInitialPage());
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
+  const navigateTo = (page: 'dashboard' | 'privacy' | 'terms') => {
+    setCurrentPage(page);
+    const path = page === 'privacy' ? '/privacy' : page === 'terms' ? '/terms' : '/';
+    if (typeof window !== 'undefined' && window.location.pathname !== path) {
+      window.history.pushState({}, '', path);
+    }
+  };
+
+  useEffect(() => {
     const handleUnauthorized = () => {
-      setIsUnlockOpen(true);
+      // Never block public privacy and terms pages with unlock modal
+      if (currentPage === 'dashboard') {
+        setIsUnlockOpen(true);
+      }
     };
     window.addEventListener('dashboard:unauthorized', handleUnauthorized);
     return () => window.removeEventListener('dashboard:unauthorized', handleUnauthorized);
-  }, []);
+  }, [currentPage]);
 
   // Renew signed media token on page load if key is stored, and every ~8 minutes
   useEffect(() => {
@@ -92,6 +123,14 @@ export const App: React.FC = () => {
     pipelineStatus?.youtube_auth?.status === 'expired' ||
     pipelineStatus?.last_run?.status === 'auth_required';
 
+  if (currentPage === 'privacy') {
+    return <PrivacyPolicyView onBackToDashboard={() => navigateTo('dashboard')} />;
+  }
+
+  if (currentPage === 'terms') {
+    return <TermsOfServiceView onBackToDashboard={() => navigateTo('dashboard')} />;
+  }
+
   return (
     <div className="min-h-screen bg-[#EDF0EC] text-[#1D3B33] flex flex-row font-ui antialiased">
       {/* Navigation rail (sidebar on desktop/tablet, bottom bar on mobile) */}
@@ -99,6 +138,7 @@ export const App: React.FC = () => {
         activeTab={activeTab}
         onTabChange={setActiveTab}
         pipelineStatus={pipelineStatus}
+        onNavigatePage={(page) => navigateTo(page)}
       />
 
       {/* Main content view */}

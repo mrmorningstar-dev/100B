@@ -23,12 +23,14 @@ interface RailProps {
   activeTab: NavTab;
   onTabChange: (tab: NavTab) => void;
   pipelineStatus?: PipelineStatusData | null;
+  onNavigatePage?: (page: 'privacy' | 'terms') => void;
 }
 
 export const Rail: React.FC<RailProps> = ({
   activeTab,
   onTabChange,
   pipelineStatus,
+  onNavigatePage,
 }) => {
   const lastRun = pipelineStatus?.last_run;
   const isLastRunPassed = lastRun?.status === 'success';
@@ -178,6 +180,25 @@ export const Rail: React.FC<RailProps> = ({
               {nextRunTimeStr}
             </p>
           )}
+        </div>
+
+        {/* Legal links (Privacy Policy & Terms of Service) */}
+        <div className="hidden xl:flex items-center justify-center gap-[8px] pt-[10px] text-[11px] text-[#8AA89B]">
+          <button
+            type="button"
+            onClick={() => (onNavigatePage ? onNavigatePage('privacy') : window.location.assign('/privacy'))}
+            className="hover:text-white transition-colors cursor-pointer"
+          >
+            Privacy
+          </button>
+          <span>·</span>
+          <button
+            type="button"
+            onClick={() => (onNavigatePage ? onNavigatePage('terms') : window.location.assign('/terms'))}
+            className="hover:text-white transition-colors cursor-pointer"
+          >
+            Terms
+          </button>
         </div>
       </aside>
 
